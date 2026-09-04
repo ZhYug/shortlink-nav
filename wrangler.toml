@@ -5,5 +5,5 @@ pages_build_output_dir = "public"
 [[d1_databases]]
 binding = "DB"
 database_name = "shortlink-nav"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "7eb62417-e4e3-4b54-b04e-5d5a02184087"
 migrations_dir = "migrations"
