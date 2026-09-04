@@ -1,0 +1,6 @@
+{
+  "name":"shortlink-nav-v3",
+  "private":true,
+  "version":"3.0.0",
+  "scripts":{"dev":"wrangler pages dev public","deploy":"wrangler pages deploy public"}
+}
