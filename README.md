@@ -95,3 +95,7 @@ shortlink-nav-v3.1/
 ```
 
 二维码功能使用 jsDelivr 的 qrcode 浏览器库；默认 favicon 使用 Google favicon 服务。
+
+
+## V3.1 Fixed deployment
+This version uses Cloudflare Pages Advanced Mode via `public/_worker.js`. The old `functions/[[path]].js` directory has been removed to avoid the Pages build error `No routes found when building Functions directory`.
