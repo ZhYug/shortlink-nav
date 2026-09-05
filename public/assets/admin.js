@@ -3,7 +3,7 @@ const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
 }[c]));
 
-const A = { links: [], nav: [], settings: {}, chart: null };
+const A = { links: [], nav: [], settings: {} };
 
 async function api(url, options = {}) {
   const response = await fetch(url, {
@@ -130,7 +130,6 @@ function drawChart(rows) {
   const W = width, H = height, padding = 22;
   const max = Math.max(1, ...rows.map((row) => Number(row.clicks) || 0));
   const styles = getComputedStyle(document.documentElement);
-
   ctx.clearRect(0, 0, W, H);
   ctx.strokeStyle = styles.getPropertyValue("--border2");
   ctx.lineWidth = 1;
@@ -138,7 +137,6 @@ function drawChart(rows) {
     const y = padding + (H - padding * 2) * i / 3;
     ctx.beginPath(); ctx.moveTo(padding, y); ctx.lineTo(W - padding, y); ctx.stroke();
   }
-
   if (!rows.length) return;
   ctx.strokeStyle = styles.getPropertyValue("--primary");
   ctx.lineWidth = 3;
@@ -153,18 +151,30 @@ function drawChart(rows) {
   ctx.stroke();
 }
 
+function linkedNav(item) {
+  return A.nav.find((nav) => Number(nav.link_id) === Number(item.id));
+}
+
 function renderLinks() {
   const query = ($("#linkSearch")?.value || "").toLowerCase();
   const rows = A.links.filter((item) => [item.code, item.url, item.title, item.category].join(" ").toLowerCase().includes(query));
-  $("#linksTable").innerHTML = rows.map((item) => `
-    <tr>
-      <td data-label="短码"><strong>/${esc(item.code)}</strong></td>
-      <td data-label="目标"><div class="link-target">${esc(item.title || item.url)}</div></td>
-      <td data-label="分类">${esc(item.category || "—")}</td><td data-label="点击">${item.clicks || 0}</td>
-      <td data-label="状态"><span class="status ${item.enabled ? "on" : "off"}">${item.enabled ? "启用" : "停用"}</span></td>
-      <td data-label="操作"><div class="row-actions"><button class="small-btn" data-act="nav" data-id="${item.id}">${A.nav.some((nav) => nav.url === item.url) ? "已在导航" : "加入导航"}</button><button class="small-btn" data-act="qr" data-id="${item.id}">QR</button><button class="small-btn" data-act="edit" data-id="${item.id}">编辑</button><button class="small-btn danger-btn" data-act="del" data-id="${item.id}">删除</button></div></td>
-    </tr>
-  `).join("") || '<tr><td colspan="6" style="text-align:center;padding:40px">暂无短链接</td></tr>';
+  $("#linksTable").innerHTML = rows.map((item) => {
+    const linked = linkedNav(item);
+    return `
+      <tr>
+        <td data-label="短码"><strong>/${esc(item.code)}</strong></td>
+        <td data-label="目标"><div class="link-target">${esc(item.title || item.url)}</div></td>
+        <td data-label="分类">${esc(item.category || "—")}</td>
+        <td data-label="点击">${item.clicks || 0}</td>
+        <td data-label="状态"><span class="status ${item.enabled ? "on" : "off"}">${item.enabled ? "启用" : "停用"}</span></td>
+        <td data-label="操作"><div class="row-actions">
+          <button class="small-btn" data-act="nav" data-id="${item.id}">${linked ? "已在导航" : "加入导航"}</button>
+          <button class="small-btn" data-act="qr" data-id="${item.id}">QR</button>
+          <button class="small-btn" data-act="edit" data-id="${item.id}">编辑</button>
+          <button class="small-btn danger-btn" data-act="del" data-id="${item.id}">删除</button>
+        </div></td>
+      </tr>`;
+  }).join("") || '<tr><td colspan="6" style="text-align:center;padding:40px">暂无短链接</td></tr>';
 }
 
 $("#linkSearch").oninput = renderLinks;
@@ -190,7 +200,6 @@ function linkModal(item = null) {
       <button class="btn primary">保存</button>
     </form>
   `);
-
   $("#linkForm").onsubmit = async (event) => {
     event.preventDefault();
     const form = new FormData(event.target);
@@ -201,43 +210,37 @@ function linkModal(item = null) {
         method: item ? "PUT" : "POST",
         body: JSON.stringify(data),
       });
-      closeModal(); toast("已保存"); await loadAll();
+      closeModal(); toast(item ? "已保存，关联导航已同步" : "已保存"); await loadAll();
     } catch (error) { toast(error.message); }
   };
 }
 
 async function addLinkToNavigation(item) {
-  const exists = A.nav.find((nav) => nav.url === item.url);
+  const exists = linkedNav(item);
   if (exists) {
     toast("这个短链接已经在导航里了");
     switchSection("navigation");
     return;
   }
-
-  const title = item.title || `/${item.code}`;
-  const description = item.description || item.url;
-  const category = item.category || "短链接";
-
   try {
     await api("/api/admin/navigation", {
       method: "POST",
-      body: JSON.stringify({
-        title,
-        description,
-        url: `${location.origin}/${item.code}`,
-        category,
-        enabled: true,
-      }),
+      body: JSON.stringify({ link_id: item.id, enabled: item.enabled !== false }),
     });
     toast("已添加到导航");
     await loadAll();
   } catch (error) {
+    if (error.message.includes("已经在导航")) switchSection("navigation");
     toast(error.message);
   }
 }
 
 async function deleteLink(item) {
-  if (!confirm(`确定删除 /${item.code} 吗？`)) return;
+  const linked = linkedNav(item);
+  const message = linked
+    ? `确定删除 /${item.code} 吗？\n对应的导航项目也会一起删除。`
+    : `确定删除 /${item.code} 吗？`;
+  if (!confirm(message)) return;
   try { await api(`/api/admin/links/${item.id}`, { method: "DELETE" }); toast("已删除"); await loadAll(); }
   catch (error) { toast(error.message); }
 }
@@ -264,6 +267,14 @@ function iconUrl(url) {
   catch { return ""; }
 }
 
+function fallbackIcon(item) {
+  const icons = ["🌐", "🔗", "⭐", "🚀", "🧭", "💡", "🛠️", "🎯", "📌", "✨", "🪐", "⚡"];
+  const text = `${item.id || ""}${item.title || ""}${item.category || ""}`;
+  let hash = 0;
+  for (const char of text) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return icons[hash % icons.length];
+}
+
 function navIcon(item) { return item.icon || iconUrl(item.url); }
 
 function renderNav() {
@@ -271,12 +282,21 @@ function renderNav() {
   element.innerHTML = A.nav.map((item) => `
     <div class="admin-nav-card" draggable="true" data-id="${item.id}">
       <div class="admin-nav-head">
-        <img class="site-icon" src="${esc(navIcon(item))}" alt="" onerror="this.style.display='none'">
-        <div><strong>${esc(item.title)}</strong><small style="display:block;color:var(--faint)">${esc(item.category || "未分类")}</small></div>
+        <div class="admin-icon-wrap">
+          <img class="site-icon" src="${esc(navIcon(item))}" alt="" onerror="this.outerHTML='<span class=&quot;site-icon site-icon-fallback&quot;>${esc(fallbackIcon(item))}</span>'">
+        </div>
+        <div class="admin-nav-title"><strong>${esc(item.title)}</strong><small>${esc(item.category || "未分类")}</small></div>
         <span class="drag-handle">⠿</span>
       </div>
       <p>${esc(item.description || item.url)}</p>
-      <div class="row-actions" style="margin-top:12px"><button class="small-btn" data-navact="edit" data-id="${item.id}">编辑</button><button class="small-btn" data-navact="del" data-id="${item.id}">删除</button></div>
+      <div class="nav-admin-badges">
+        ${item.link_id ? '<span class="linked-badge">短链接关联</span>' : '<span class="manual-badge">手动导航</span>'}
+      </div>
+      <div class="row-actions nav-admin-actions">
+        <button class="small-btn" data-navact="copy" data-id="${item.id}">复制链接</button>
+        <button class="small-btn" data-navact="edit" data-id="${item.id}">编辑</button>
+        <button class="small-btn danger-btn" data-navact="del" data-id="${item.id}">删除</button>
+      </div>
     </div>
   `).join("") || '<div class="panel" style="padding:30px">暂无导航</div>';
   bindDrag();
@@ -296,12 +316,33 @@ function bindDrag() {
   });
 }
 
-$("#navAdminGrid").onclick = (event) => {
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const input = document.createElement("textarea");
+    input.value = text;
+    input.style.position = "fixed";
+    input.style.opacity = "0";
+    document.body.appendChild(input);
+    input.focus();
+    input.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch {}
+    input.remove();
+    return ok;
+  }
+}
+
+$("#navAdminGrid").onclick = async (event) => {
   const button = event.target.closest("[data-navact]");
   if (!button) return;
   const item = A.nav.find((value) => value.id == button.dataset.id);
   if (!item) return;
-  button.dataset.navact === "edit" ? navModal(item) : deleteNav(item);
+  if (button.dataset.navact === "edit") navModal(item);
+  if (button.dataset.navact === "del") deleteNav(item);
+  if (button.dataset.navact === "copy") toast(await copyText(item.url) ? "链接已复制" : "复制失败");
 };
 
 $("#saveNavOrder").onclick = async () => {
@@ -317,16 +358,17 @@ function navModal(item = null) {
       <label>URL<input name="url" required value="${esc(item?.url || "")}"></label>
       <label>描述<textarea name="description" rows="3">${esc(item?.description || "")}</textarea></label>
       <label>图标 URL（可选）<input name="icon" value="${esc(item?.icon || "")}" placeholder="留空自动使用网站 favicon"></label>
+      ${item?.link_id ? '<div class="form-note">此导航已关联短链接。短链接修改后，标题、描述、地址、分类和状态会自动同步。</div>' : ''}
       <label class="checkbox"><input name="enabled" type="checkbox" ${item?.enabled !== false ? "checked" : ""}> 启用</label>
       <button class="btn primary">保存</button>
     </form>
   `);
-
   $("#navForm").onsubmit = async (event) => {
     event.preventDefault();
     const form = new FormData(event.target);
     const data = Object.fromEntries(form.entries());
     data.enabled = form.get("enabled") === "on";
+    if (item?.link_id) data.link_id = item.link_id;
     try {
       await api(item ? `/api/admin/navigation/${item.id}` : "/api/admin/navigation", {
         method: item ? "PUT" : "POST",
@@ -345,8 +387,10 @@ async function deleteNav(item) {
 
 function fillSettings() {
   const form = $("#settingsForm");
-  ["site_title", "site_subtitle", "site_description", "hero_title", "hero_description", "accent"].forEach((key) => {
-    if (form.elements[key]) form.elements[key].value = A.settings[key] || (key === "accent" ? "#8b6cff" : "");
+  ["site_title", "site_subtitle", "site_description", "hero_title", "hero_description", "accent", "nav_tag_style", "nav_columns_mobile", "nav_columns_tablet", "nav_columns_desktop", "nav_columns_wide", "nav_category_order", "nav_hidden_categories"].forEach((key) => {
+    if (form.elements[key]) form.elements[key].value = A.settings[key] || ({
+      accent: "#8b6cff", nav_tag_style: "pills", nav_columns_mobile: "2", nav_columns_tablet: "3", nav_columns_desktop: "4", nav_columns_wide: "6"
+    }[key] || "");
   });
 }
 
@@ -387,7 +431,6 @@ $("#csvFile").onchange = async (event) => {
   const text = await file.text();
   const lines = text.replace(/^\ufeff/, "").split(/\r?\n/).filter(Boolean);
   if (lines.length < 2) { toast("CSV 没有数据"); return; }
-
   const parseCsvLine = (line) => {
     const values = [];
     let current = "", quoted = false;
@@ -401,7 +444,6 @@ $("#csvFile").onchange = async (event) => {
     values.push(current);
     return values;
   };
-
   const headers = parseCsvLine(lines[0]).map((x) => x.trim());
   let success = 0;
   for (const line of lines.slice(1)) {
@@ -420,8 +462,8 @@ function toggleAdminTheme() {
   localStorage.setItem("sln_admin_theme", document.documentElement.classList.contains("light-admin") ? "light" : "dark");
   $("#adminThemeBtn").textContent = document.documentElement.classList.contains("light-admin") ? "☀" : "☾";
 }
+
 if (localStorage.getItem("sln_admin_theme") === "light") document.documentElement.classList.add("light-admin");
 $("#adminThemeBtn").textContent = document.documentElement.classList.contains("light-admin") ? "☀" : "☾";
 $("#adminThemeBtn").onclick = toggleAdminTheme;
-
 boot();

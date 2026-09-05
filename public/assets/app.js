@@ -14,10 +14,18 @@ const state = {
 
 function iconUrl(url) {
   try {
-    return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(new URL(url).hostname)}&sz=64`;
+    return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(new URL(url).hostname)}&sz=128`;
   } catch {
     return "";
   }
+}
+
+function fallbackIcon(item) {
+  const icons = ["🌐", "🔗", "⭐", "🚀", "🧭", "💡", "🛠️", "🎯", "📌", "✨", "🪐", "⚡"];
+  const text = `${item.id || ""}${item.title || ""}${item.category || ""}`;
+  let hash = 0;
+  for (const char of text) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return icons[hash % icons.length];
 }
 
 function savePrefs() {
@@ -38,7 +46,6 @@ function applySettings() {
   const subtitle = s.site_subtitle || "Personal links";
   const heroTitle = s.hero_title || "Everything you need, one click away.";
   const heroDescription = s.hero_description || s.site_description || "A fast, elegant home for your frequently used websites.";
-
   document.title = siteTitle;
   $("#siteTitle").textContent = siteTitle;
   $("#siteSubtitle").textContent = subtitle;
@@ -49,6 +56,35 @@ function applySettings() {
   if (s.accent && /^#[0-9a-fA-F]{6}$/.test(s.accent)) {
     document.documentElement.style.setProperty("--primary", s.accent);
   }
+
+  const root = document.documentElement;
+  root.style.setProperty("--nav-columns-mobile", normalizeColumns(s.nav_columns_mobile, 2));
+  root.style.setProperty("--nav-columns-tablet", normalizeColumns(s.nav_columns_tablet, 3));
+  root.style.setProperty("--nav-columns-desktop", normalizeColumns(s.nav_columns_desktop, 4));
+  root.style.setProperty("--nav-columns-wide", normalizeColumns(s.nav_columns_wide, 6));
+  root.dataset.navTagStyle = ["pills", "tabs", "sections"].includes(s.nav_tag_style) ? s.nav_tag_style : "pills";
+}
+
+function normalizeColumns(value, fallback) {
+  const n = Number(value);
+  return String(Number.isFinite(n) && n >= 1 && n <= 6 ? Math.round(n) : fallback);
+}
+
+function categoryList() {
+  const available = [...new Set(state.items.map((item) => item.category).filter(Boolean))];
+  const order = String(state.settings.nav_category_order || "")
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+  const hidden = new Set(String(state.settings.nav_hidden_categories || "")
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean));
+  const ordered = [
+    ...order.filter((name) => available.includes(name)),
+    ...available.filter((name) => !order.includes(name)),
+  ];
+  return ordered.filter((name) => !hidden.has(name));
 }
 
 async function init() {
@@ -69,7 +105,8 @@ async function init() {
 }
 
 function renderCats() {
-  const cats = ["全部", ...new Set(state.items.map((item) => item.category).filter(Boolean))];
+  const cats = ["全部", ...categoryList()];
+  if (!cats.includes(state.category)) state.category = "全部";
   $("#categoryChips").innerHTML = cats.map((category) => `
     <button class="chip ${state.category === category ? "active" : ""}" data-cat="${esc(category)}">${esc(category)}</button>
   `).join("");
@@ -92,24 +129,54 @@ function filtered() {
   );
 }
 
-function render() {
-  const list = filtered();
-  $("#navGrid").innerHTML = list.map((item, index) => {
-    const favorite = state.favorites.includes(item.id);
-    const icon = item.icon || iconUrl(item.url);
-    let fallback = "?";
-    try { fallback = (item.title || new URL(item.url).hostname || "?")[0].toUpperCase(); } catch {}
-
-    return `<a class="nav-card" style="animation:fadeUp .28s ease ${Math.min(index, 10) * 0.035}s both" href="${esc(item.url)}" data-id="${item.id}">
-      <div class="nav-top">
+function cardHtml(item, index) {
+  const favorite = state.favorites.includes(item.id);
+  const icon = item.icon || iconUrl(item.url);
+  let fallback = fallbackIcon(item);
+  try { fallback = fallbackIcon(item) || (item.title || new URL(item.url).hostname || "?")[0].toUpperCase(); } catch {}
+  return `<article class="nav-card" style="animation:fadeUp .28s ease ${Math.min(index, 10) * 0.035}s both" data-id="${item.id}">
+    <div class="nav-top">
+      <a class="nav-card-open" href="${esc(item.url)}" aria-label="打开 ${esc(item.title)}">
         <img class="site-icon" src="${esc(icon)}" alt="" onerror="this.outerHTML='<span class=&quot;site-icon site-icon-fallback&quot;>${esc(fallback)}</span>'">
+      </a>
+      <div class="nav-card-actions">
+        <button class="copy-btn" data-copy="${item.id}" title="复制链接" aria-label="复制链接">⧉</button>
         <button class="favorite ${favorite ? "active" : ""}" data-fav="${item.id}" title="收藏" aria-label="收藏">${favorite ? "★" : "☆"}</button>
       </div>
+    </div>
+    <a class="nav-card-content" href="${esc(item.url)}">
       <h3>${esc(item.title)}</h3>
       <p>${esc(item.description || (() => { try { return new URL(item.url).hostname; } catch { return item.url; } })())}</p>
-      <div class="nav-meta">${item.category ? `<span class="tag">${esc(item.category)}</span>` : ""}</div>
-    </a>`;
-  }).join("");
+    </a>
+    <div class="nav-meta">
+      ${item.category ? `<span class="tag">${esc(item.category)}</span>` : ""}
+      ${item.link_id ? `<span class="tag link-tag">短链接</span>` : ""}
+    </div>
+  </article>`;
+}
+
+function render() {
+  const list = filtered();
+  const style = document.documentElement.dataset.navTagStyle || "pills";
+
+  if (style === "sections" && state.category === "全部") {
+    const groups = categoryList();
+    const grouped = groups.map((category) => ({
+      category,
+      items: list.filter((item) => item.category === category),
+    })).filter((group) => group.items.length);
+    const uncategorized = list.filter((item) => !item.category);
+    $("#navGrid").innerHTML = grouped.map((group) => `
+      <section class="nav-category-section">
+        <div class="nav-category-heading"><span>${esc(group.category)}</span><b>${group.items.length}</b></div>
+        <div class="nav-grid-section">${group.items.map((item, index) => cardHtml(item, index)).join("")}</div>
+      </section>
+    `).join("") + (uncategorized.length ? `
+      <section class="nav-category-section"><div class="nav-category-heading"><span>未分类</span><b>${uncategorized.length}</b></div><div class="nav-grid-section">${uncategorized.map((item, index) => cardHtml(item, index)).join("")}</div></section>
+    ` : "");
+  } else {
+    $("#navGrid").innerHTML = list.map(cardHtml).join("");
+  }
 
   $("#emptyState").classList.toggle("hidden", list.length > 0);
 
@@ -127,8 +194,21 @@ function render() {
     };
   });
 
+  document.querySelectorAll("[data-copy]").forEach((button) => {
+    button.onclick = async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const item = state.items.find((value) => value.id === Number(button.dataset.copy));
+      if (!item) return;
+      const ok = await copyText(item.url);
+      button.textContent = ok ? "✓" : "×";
+      setTimeout(() => { button.textContent = "⧉"; }, 1200);
+    };
+  });
+
   document.querySelectorAll(".nav-card").forEach((card) => {
-    card.onclick = () => {
+    card.onclick = (event) => {
+      if (event.target.closest("button")) return;
       const id = Number(card.dataset.id);
       state.recent = [id, ...state.recent.filter((value) => value !== id)];
       savePrefs();
@@ -136,10 +216,29 @@ function render() {
   });
 }
 
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const input = document.createElement("textarea");
+    input.value = text;
+    input.style.position = "fixed";
+    input.style.opacity = "0";
+    document.body.appendChild(input);
+    input.focus();
+    input.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch {}
+    input.remove();
+    return ok;
+  }
+}
+
 function renderRecent() {
   const items = state.recent.map((id) => state.items.find((item) => item.id === id)).filter(Boolean);
   $("#recentGrid").innerHTML = items.length
-    ? items.map((item) => `<a class="recent-item" href="${esc(item.url)}"><img src="${esc(item.icon || iconUrl(item.url))}" alt=""><span>${esc(item.title)}</span></a>`).join("")
+    ? items.map((item) => `<a class="recent-item" href="${esc(item.url)}"><img src="${esc(item.icon || iconUrl(item.url))}" alt="" onerror="this.outerHTML='<span class=&quot;recent-icon-fallback&quot;>${esc(fallbackIcon(item))}</span>'"><span>${esc(item.title)}</span></a>`).join("")
     : '<span style="color:var(--faint);font-size:13px">还没有访问记录</span>';
 }
 
@@ -149,6 +248,7 @@ $("#favoritesOnly").onclick = () => {
   $("#favoritesOnly").textContent = state.favoritesOnly ? "★ 已收藏" : "☆ 收藏";
   render();
 };
+
 $("#clearFilters").onclick = () => {
   $("#searchInput").value = "";
   state.category = "全部";
@@ -157,10 +257,29 @@ $("#clearFilters").onclick = () => {
   renderCats();
   render();
 };
+
 $("#clearRecent").onclick = () => {
   state.recent = [];
   savePrefs();
   renderRecent();
+};
+
+function applyTheme() {
+  const saved = localStorage.getItem("sln_theme");
+  if (saved === "light") document.documentElement.setAttribute("data-theme", "light");
+  $("#themeBtn").textContent = saved === "light" ? "☀" : "☾";
+}
+
+$("#themeBtn").onclick = () => {
+  const light = document.documentElement.getAttribute("data-theme") === "light";
+  if (light) {
+    document.documentElement.removeAttribute("data-theme");
+    localStorage.setItem("sln_theme", "dark");
+  } else {
+    document.documentElement.setAttribute("data-theme", "light");
+    localStorage.setItem("sln_theme", "light");
+  }
+  $("#themeBtn").textContent = light ? "☾" : "☀";
 };
 
 document.addEventListener("keydown", (event) => {
@@ -170,16 +289,5 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-function toggleTheme() {
-  const light = document.documentElement.dataset.theme !== "light";
-  document.documentElement.dataset.theme = light ? "light" : "dark";
-  localStorage.setItem("sln_theme", light ? "light" : "dark");
-  $("#themeBtn").textContent = light ? "☀" : "☾";
-}
-
-const savedTheme = localStorage.getItem("sln_theme");
-if (savedTheme === "light") document.documentElement.dataset.theme = "light";
-$("#themeBtn").textContent = savedTheme === "light" ? "☀" : "☾";
-$("#themeBtn").onclick = toggleTheme;
-
+applyTheme();
 init();
