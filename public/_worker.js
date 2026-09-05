@@ -452,14 +452,34 @@ export default {
       if (parts[0] === "api") return await handleApi(request, env, ctx, parts);
 
       // Pages Assets 不同配置下对 /admin 的处理可能不同，这里显式映射到 admin.html。
-      if (url.pathname === "/admin" || url.pathname === "/admin/") {
-        return env.ASSETS.fetch(new Request(new URL("/admin.html", url), request));
-      }
+      if (
+  url.pathname === "/admin" ||
+  url.pathname === "/admin/"
+) {
+  const adminUrl = new URL("/admin.html", url);
+  const adminRequest = new Request(adminUrl.toString(), {
+    method: "GET",
+    headers: request.headers,
+  });
 
-      if (parts.length === 1 && parts[0]) {
-        const redirect = await handleRedirect(request, env, ctx, parts[0]);
-        if (redirect) return redirect;
-      }
+  return env.ASSETS.fetch(adminRequest);
+}
+
+      if (
+  parts.length === 1 &&
+  parts[0] &&
+  parts[0] !== "admin.html"
+) {
+  const redirect =
+    await handleRedirect(
+      request,
+      env,
+      ctx,
+      parts[0]
+    );
+
+  if (redirect) return redirect;
+}
 
       return env.ASSETS.fetch(request);
     } catch (error) {
