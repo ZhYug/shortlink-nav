@@ -313,16 +313,79 @@ async function handleApi(request, env, ctx, parts) {
 
   if (path === "/api/admin/navigation" && method === "POST") {
     const data = await body(request);
+
+    // V3.3：短链接直接加入导航
+    if (data.link_id !== undefined && data.link_id !== null && data.link_id !== "") {
+      const linkId = Number(data.link_id);
+
+      if (!Number.isInteger(linkId) || linkId <= 0) {
+        return json({ error: "短链接 ID 无效" }, 400);
+      }
+
+      const link = await env.DB.prepare(
+        "SELECT * FROM links WHERE id=?"
+      ).bind(linkId).first();
+
+      if (!link) {
+        return json({ error: "短链接不存在" }, 404);
+      }
+
+      const exists = await env.DB.prepare(
+        "SELECT id FROM navigation WHERE link_id=? LIMIT 1"
+      ).bind(linkId).first();
+
+      if (exists) {
+        return json({ error: "这个短链接已经在导航里了" }, 409);
+      }
+
+      const max = await env.DB.prepare(
+        "SELECT COALESCE(MAX(sort_order),-1) m FROM navigation"
+      ).first();
+
+      const requestUrl = new URL(request.url);
+      const shortUrl = requestUrl.origin + "/" + link.code;
+
+      const icon =
+        "https://www.google.com/s2/favicons?domain=" +
+        encodeURIComponent(link.url) +
+        "&sz=128";
+
+      await env.DB.prepare(
+        `INSERT INTO navigation
+         (link_id,title,description,url,icon,category,sort_order,enabled,updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?)`
+      )
+        .bind(
+          linkId,
+          clean(link.title, 120),
+          clean(link.description, 500),
+          shortUrl,
+          icon,
+          clean(link.category, 80),
+          Number(max?.m ?? -1) + 1,
+          data.enabled === false || link.enabled === 0 ? 0 : 1,
+          now()
+        )
+        .run();
+
+      return json({ ok: true });
+    }
+
+    // 保留手动添加导航
     const title = clean(data.title, 120);
     const url = clean(data.url, 2000);
-    if (!title || !validUrl(url)) return json({ error: "标题和有效 URL 必填" }, 400);
+
+    if (!title || !validUrl(url)) {
+      return json({ error: "标题和有效 URL 必填" }, 400);
+    }
 
     const max = await env.DB.prepare(
       "SELECT COALESCE(MAX(sort_order),-1) m FROM navigation"
     ).first();
 
     await env.DB.prepare(
-      `INSERT INTO navigation(title,description,url,icon,category,sort_order,enabled,updated_at)
+      `INSERT INTO navigation
+       (title,description,url,icon,category,sort_order,enabled,updated_at)
        VALUES(?,?,?,?,?,?,?,?)`
     )
       .bind(
