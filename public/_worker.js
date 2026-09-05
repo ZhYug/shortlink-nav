@@ -167,20 +167,27 @@ async function handleApi(request, env, ctx, parts) {
   }
 
   if (path === "/api/public/navigation" && method === "GET") {
-    const result = await env.DB.prepare(
-      `SELECT id,title,description,url,icon,category,sort_order,enabled
-       FROM navigation WHERE enabled=1 ORDER BY sort_order,id`
-    ).all();
+  const result = await env.DB.prepare(
+    `SELECT
+       navigation.*,
+       links.code
+     FROM navigation
+     LEFT JOIN links ON navigation.link_id = links.id
+     WHERE navigation.enabled=1
+     ORDER BY navigation.sort_order,navigation.id`
+  ).all();
 
-    const items = result.results.map((item) => {
-      if (item.code) {
-        item.url = new URL(request.url).origin + "/" + item.code;
-      }
-      return item;
-    });
+  const origin = new URL(request.url).origin;
 
-    return json({ items });
-  }
+  const items = result.results.map((item) => {
+    if (item.code) {
+      item.url = origin + "/" + item.code;
+    }
+    return item;
+  });
+
+  return json({ items });
+}
 
   if (path === "/api/public/settings" && method === "GET") {
     const result = await env.DB.prepare("SELECT key,value FROM settings").all();
