@@ -158,11 +158,11 @@ function renderLinks() {
   const rows = A.links.filter((item) => [item.code, item.url, item.title, item.category].join(" ").toLowerCase().includes(query));
   $("#linksTable").innerHTML = rows.map((item) => `
     <tr>
-      <td><strong>/${esc(item.code)}</strong></td>
-      <td><div style="max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(item.title || item.url)}</div></td>
-      <td>${esc(item.category || "—")}</td><td>${item.clicks || 0}</td>
-      <td><span class="status ${item.enabled ? "on" : "off"}">${item.enabled ? "启用" : "停用"}</span></td>
-      <td><div class="row-actions"><button class="small-btn" data-act="qr" data-id="${item.id}">QR</button><button class="small-btn" data-act="edit" data-id="${item.id}">编辑</button><button class="small-btn" data-act="del" data-id="${item.id}">删除</button></div></td>
+      <td data-label="短码"><strong>/${esc(item.code)}</strong></td>
+      <td data-label="目标"><div class="link-target">${esc(item.title || item.url)}</div></td>
+      <td data-label="分类">${esc(item.category || "—")}</td><td data-label="点击">${item.clicks || 0}</td>
+      <td data-label="状态"><span class="status ${item.enabled ? "on" : "off"}">${item.enabled ? "启用" : "停用"}</span></td>
+      <td data-label="操作"><div class="row-actions"><button class="small-btn" data-act="nav" data-id="${item.id}">${A.nav.some((nav) => nav.url === item.url) ? "已在导航" : "加入导航"}</button><button class="small-btn" data-act="qr" data-id="${item.id}">QR</button><button class="small-btn" data-act="edit" data-id="${item.id}">编辑</button><button class="small-btn danger-btn" data-act="del" data-id="${item.id}">删除</button></div></td>
     </tr>
   `).join("") || '<tr><td colspan="6" style="text-align:center;padding:40px">暂无短链接</td></tr>';
 }
@@ -176,6 +176,7 @@ $("#linksTable").onclick = (event) => {
   if (button.dataset.act === "edit") linkModal(item);
   if (button.dataset.act === "del") deleteLink(item);
   if (button.dataset.act === "qr") qrModal(item);
+  if (button.dataset.act === "nav") addLinkToNavigation(item);
 };
 
 function linkModal(item = null) {
@@ -203,6 +204,36 @@ function linkModal(item = null) {
       closeModal(); toast("已保存"); await loadAll();
     } catch (error) { toast(error.message); }
   };
+}
+
+async function addLinkToNavigation(item) {
+  const exists = A.nav.find((nav) => nav.url === item.url);
+  if (exists) {
+    toast("这个短链接已经在导航里了");
+    switchSection("navigation");
+    return;
+  }
+
+  const title = item.title || `/${item.code}`;
+  const description = item.description || item.url;
+  const category = item.category || "短链接";
+
+  try {
+    await api("/api/admin/navigation", {
+      method: "POST",
+      body: JSON.stringify({
+        title,
+        description,
+        url: `${location.origin}/${item.code}`,
+        category,
+        enabled: true,
+      }),
+    });
+    toast("已添加到导航");
+    await loadAll();
+  } catch (error) {
+    toast(error.message);
+  }
 }
 
 async function deleteLink(item) {
