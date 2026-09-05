@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS links (
 );
 CREATE INDEX IF NOT EXISTS idx_links_code ON links(code);
 CREATE INDEX IF NOT EXISTS idx_links_enabled ON links(enabled);
+CREATE INDEX IF NOT EXISTS idx_links_created_at ON links(created_at);
 
 CREATE TABLE IF NOT EXISTS link_visits (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -35,6 +36,7 @@ CREATE TABLE IF NOT EXISTS navigation (
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_navigation_order ON navigation(sort_order);
+CREATE INDEX IF NOT EXISTS idx_navigation_enabled_order ON navigation(enabled,sort_order);
 
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,

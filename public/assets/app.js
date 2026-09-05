@@ -1,14 +1,185 @@
-const $=s=>document.querySelector(s);
-const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const state={items:[],settings:{},category:'全部',favoritesOnly:false,recent:JSON.parse(localStorage.getItem('sln_recent')||'[]'),favorites:JSON.parse(localStorage.getItem('sln_favorites')||'[]')};
-function iconUrl(url){try{return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(new URL(url).hostname)}&sz=64`}catch{return ''}}
-function savePrefs(){localStorage.setItem('sln_recent',JSON.stringify(state.recent.slice(0,8)));localStorage.setItem('sln_favorites',JSON.stringify(state.favorites))}
-async function api(url,opts){const r=await fetch(url,opts);const j=await r.json().catch(()=>({}));if(!r.ok)throw Error(j.error||'请求失败');return j}
-async function init(){try{const [n,s]=await Promise.all([api('/api/public/navigation'),api('/api/public/settings')]);state.items=n.items||[];state.settings=s.settings||{};document.title=state.settings.site_title||'My Navigation';$('#siteTitle').textContent=state.settings.site_title||'My Navigation';$('#siteSubtitle').textContent=state.settings.site_subtitle||'Personal links';$('#heroDesc').textContent=state.settings.site_description||'A fast, elegant home for your frequently used websites.';$('#footerText').textContent=state.settings.site_subtitle||'Personal navigation & short links';if(state.settings.accent)document.documentElement.style.setProperty('--primary',state.settings.accent);renderCats();render();renderRecent()}catch(e){$('#navGrid').innerHTML=`<div class="empty-state"><h3>加载失败</h3><p>${esc(e.message)}</p></div>`}}
-function renderCats(){const cats=['全部',...new Set(state.items.map(x=>x.category).filter(Boolean))];$('#categoryChips').innerHTML=cats.map(c=>`<button class="chip ${state.category===c?'active':''}" data-cat="${esc(c)}">${esc(c)}</button>`).join('');document.querySelectorAll('[data-cat]').forEach(b=>b.onclick=()=>{state.category=b.dataset.cat;renderCats();render()})}
-function filtered(){const q=$('#searchInput').value.trim().toLowerCase();return state.items.filter(x=>(state.category==='全部'||x.category===state.category)&&(!state.favoritesOnly||state.favorites.includes(x.id))&&(!q||[x.title,x.description,x.category,x.url].join(' ').toLowerCase().includes(q)))}
-function render(){const list=filtered();$('#navGrid').innerHTML=list.map((x,i)=>`<a class="nav-card" style="animation:fadeUp .28s ease ${Math.min(i,10)*.035}s both" href="${esc(x.url)}" data-id="${x.id}"><div class="nav-top"><img class="site-icon" src="${iconUrl(x.url)}" onerror="this.outerHTML='<span class=&quot;site-icon site-icon-fallback&quot;>${esc((x.title||'?')[0].toUpperCase())}</span>'"><button class="favorite ${state.favorites.includes(x.id)?'active':''}" data-fav="${x.id}" title="收藏">${state.favorites.includes(x.id)?'★':'☆'}</button></div><h3>${esc(x.title)}</h3><p>${esc(x.description||new URL(x.url).hostname)}</p><div class="nav-meta">${x.category?`<span class="tag">${esc(x.category)}</span>`:''}</div></a>`).join('');$('#emptyState').classList.toggle('hidden',list.length>0);document.querySelectorAll('[data-fav]').forEach(b=>b.onclick=e=>{e.preventDefault();e.stopPropagation();const id=+b.dataset.fav;state.favorites=state.favorites.includes(id)?state.favorites.filter(v=>v!==id):[...state.favorites,id];savePrefs();render()});document.querySelectorAll('.nav-card').forEach(a=>a.onclick=()=>{const id=+a.dataset.id;state.recent=[id,...state.recent.filter(v=>v!==id)];savePrefs()})}
-function renderRecent(){const items=state.recent.map(id=>state.items.find(x=>x.id===id)).filter(Boolean);$('#recentGrid').innerHTML=items.length?items.map(x=>`<a class="recent-item" href="${esc(x.url)}"><img src="${iconUrl(x.url)}"><span>${esc(x.title)}</span></a>`).join(''):'<span style="color:var(--faint);font-size:13px">还没有访问记录</span>'}
-$('#searchInput').oninput=render;$('#favoritesOnly').onclick=()=>{state.favoritesOnly=!state.favoritesOnly;$('#favoritesOnly').textContent=state.favoritesOnly?'★ 已收藏':'☆ 收藏';render()};$('#clearFilters').onclick=()=>{$('#searchInput').value='';state.category='全部';state.favoritesOnly=false;renderCats();render()};$('#clearRecent').onclick=()=>{state.recent=[];savePrefs();renderRecent()};
-document.addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();$('#searchInput').focus()}});
-function theme(){const dark=document.body.dataset.theme!=='light';document.body.dataset.theme=dark?'light':'';if(dark){document.documentElement.style.setProperty('--bg','#f4f6fb');document.documentElement.style.setProperty('--bg2','#eef1f7');document.documentElement.style.setProperty('--surface','rgba(255,255,255,.78)');document.documentElement.style.setProperty('--surface2','rgba(0,0,0,.035)');document.documentElement.style.setProperty('--surface3','rgba(0,0,0,.06)');document.documentElement.style.setProperty('--text','#151821');document.documentElement.style.setProperty('--muted','#657084');document.documentElement.style.setProperty('--faint','#8993a5');document.documentElement.style.setProperty('--border','rgba(20,25,35,.10)');document.documentElement.style.setProperty('--border2','rgba(20,25,35,.18)');$('#themeBtn').textContent='☀'}else location.reload()}$('#themeBtn').onclick=theme;init();
+const $ = (selector) => document.querySelector(selector);
+const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({
+  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+}[c]));
+
+const state = {
+  items: [],
+  settings: {},
+  category: "全部",
+  favoritesOnly: false,
+  recent: JSON.parse(localStorage.getItem("sln_recent") || "[]"),
+  favorites: JSON.parse(localStorage.getItem("sln_favorites") || "[]"),
+};
+
+function iconUrl(url) {
+  try {
+    return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(new URL(url).hostname)}&sz=64`;
+  } catch {
+    return "";
+  }
+}
+
+function savePrefs() {
+  localStorage.setItem("sln_recent", JSON.stringify(state.recent.slice(0, 8)));
+  localStorage.setItem("sln_favorites", JSON.stringify(state.favorites));
+}
+
+async function api(url, options = {}) {
+  const response = await fetch(url, { credentials: "same-origin", ...options });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || "请求失败");
+  return data;
+}
+
+function applySettings() {
+  const s = state.settings;
+  const siteTitle = s.site_title || "My Navigation";
+  const subtitle = s.site_subtitle || "Personal links";
+  const heroTitle = s.hero_title || "Everything you need, one click away.";
+  const heroDescription = s.hero_description || s.site_description || "A fast, elegant home for your frequently used websites.";
+
+  document.title = siteTitle;
+  $("#siteTitle").textContent = siteTitle;
+  $("#siteSubtitle").textContent = subtitle;
+  $("#heroTitle").textContent = heroTitle;
+  $("#heroDesc").textContent = heroDescription;
+  $("#footerText").textContent = subtitle;
+
+  if (s.accent && /^#[0-9a-fA-F]{6}$/.test(s.accent)) {
+    document.documentElement.style.setProperty("--primary", s.accent);
+  }
+}
+
+async function init() {
+  try {
+    const [navigation, settings] = await Promise.all([
+      api("/api/public/navigation"),
+      api("/api/public/settings"),
+    ]);
+    state.items = navigation.items || [];
+    state.settings = settings.settings || {};
+    applySettings();
+    renderCats();
+    render();
+    renderRecent();
+  } catch (error) {
+    $("#navGrid").innerHTML = `<div class="empty-state"><h3>加载失败</h3><p>${esc(error.message)}</p></div>`;
+  }
+}
+
+function renderCats() {
+  const cats = ["全部", ...new Set(state.items.map((item) => item.category).filter(Boolean))];
+  $("#categoryChips").innerHTML = cats.map((category) => `
+    <button class="chip ${state.category === category ? "active" : ""}" data-cat="${esc(category)}">${esc(category)}</button>
+  `).join("");
+
+  document.querySelectorAll("[data-cat]").forEach((button) => {
+    button.onclick = () => {
+      state.category = button.dataset.cat;
+      renderCats();
+      render();
+    };
+  });
+}
+
+function filtered() {
+  const query = $("#searchInput").value.trim().toLowerCase();
+  return state.items.filter((item) =>
+    (state.category === "全部" || item.category === state.category) &&
+    (!state.favoritesOnly || state.favorites.includes(item.id)) &&
+    (!query || [item.title, item.description, item.category, item.url].join(" ").toLowerCase().includes(query))
+  );
+}
+
+function render() {
+  const list = filtered();
+  $("#navGrid").innerHTML = list.map((item, index) => {
+    const favorite = state.favorites.includes(item.id);
+    const icon = item.icon || iconUrl(item.url);
+    let fallback = "?";
+    try { fallback = (item.title || new URL(item.url).hostname || "?")[0].toUpperCase(); } catch {}
+
+    return `<a class="nav-card" style="animation:fadeUp .28s ease ${Math.min(index, 10) * 0.035}s both" href="${esc(item.url)}" data-id="${item.id}">
+      <div class="nav-top">
+        <img class="site-icon" src="${esc(icon)}" alt="" onerror="this.outerHTML='<span class=&quot;site-icon site-icon-fallback&quot;>${esc(fallback)}</span>'">
+        <button class="favorite ${favorite ? "active" : ""}" data-fav="${item.id}" title="收藏" aria-label="收藏">${favorite ? "★" : "☆"}</button>
+      </div>
+      <h3>${esc(item.title)}</h3>
+      <p>${esc(item.description || (() => { try { return new URL(item.url).hostname; } catch { return item.url; } })())}</p>
+      <div class="nav-meta">${item.category ? `<span class="tag">${esc(item.category)}</span>` : ""}</div>
+    </a>`;
+  }).join("");
+
+  $("#emptyState").classList.toggle("hidden", list.length > 0);
+
+  document.querySelectorAll("[data-fav]").forEach((button) => {
+    button.onclick = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const id = Number(button.dataset.fav);
+      state.favorites = state.favorites.includes(id)
+        ? state.favorites.filter((value) => value !== id)
+        : [...state.favorites, id];
+      savePrefs();
+      render();
+      renderRecent();
+    };
+  });
+
+  document.querySelectorAll(".nav-card").forEach((card) => {
+    card.onclick = () => {
+      const id = Number(card.dataset.id);
+      state.recent = [id, ...state.recent.filter((value) => value !== id)];
+      savePrefs();
+    };
+  });
+}
+
+function renderRecent() {
+  const items = state.recent.map((id) => state.items.find((item) => item.id === id)).filter(Boolean);
+  $("#recentGrid").innerHTML = items.length
+    ? items.map((item) => `<a class="recent-item" href="${esc(item.url)}"><img src="${esc(item.icon || iconUrl(item.url))}" alt=""><span>${esc(item.title)}</span></a>`).join("")
+    : '<span style="color:var(--faint);font-size:13px">还没有访问记录</span>';
+}
+
+$("#searchInput").oninput = render;
+$("#favoritesOnly").onclick = () => {
+  state.favoritesOnly = !state.favoritesOnly;
+  $("#favoritesOnly").textContent = state.favoritesOnly ? "★ 已收藏" : "☆ 收藏";
+  render();
+};
+$("#clearFilters").onclick = () => {
+  $("#searchInput").value = "";
+  state.category = "全部";
+  state.favoritesOnly = false;
+  $("#favoritesOnly").textContent = "☆ 收藏";
+  renderCats();
+  render();
+};
+$("#clearRecent").onclick = () => {
+  state.recent = [];
+  savePrefs();
+  renderRecent();
+};
+
+document.addEventListener("keydown", (event) => {
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+    event.preventDefault();
+    $("#searchInput").focus();
+  }
+});
+
+function toggleTheme() {
+  const light = document.documentElement.dataset.theme !== "light";
+  document.documentElement.dataset.theme = light ? "light" : "dark";
+  localStorage.setItem("sln_theme", light ? "light" : "dark");
+  $("#themeBtn").textContent = light ? "☀" : "☾";
+}
+
+const savedTheme = localStorage.getItem("sln_theme");
+if (savedTheme === "light") document.documentElement.dataset.theme = "light";
+$("#themeBtn").textContent = savedTheme === "light" ? "☀" : "☾";
+$("#themeBtn").onclick = toggleTheme;
+
+init();
