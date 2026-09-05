@@ -171,7 +171,15 @@ async function handleApi(request, env, ctx, parts) {
       `SELECT id,title,description,url,icon,category,sort_order,enabled
        FROM navigation WHERE enabled=1 ORDER BY sort_order,id`
     ).all();
-    return json({ items: result.results });
+
+    const items = result.results.map((item) => {
+      if (item.code) {
+        item.url = new URL(request.url).origin + "/" + item.code;
+      }
+      return item;
+    });
+
+    return json({ items });
   }
 
   if (path === "/api/public/settings" && method === "GET") {
@@ -216,7 +224,14 @@ async function handleApi(request, env, ctx, parts) {
     const result = await env.DB.prepare(
       "SELECT * FROM links ORDER BY created_at DESC,id DESC"
     ).all();
-    return json({ items: result.results });
+    const items = result.results.map((item) => {
+      if (item.code) {
+        item.url = new URL(request.url).origin + "/" + item.code;
+      }
+      return item;
+    });
+
+    return json({ items });
   }
 
   if (path === "/api/admin/links" && method === "POST") {
@@ -338,7 +353,14 @@ async function handleApi(request, env, ctx, parts) {
        LEFT JOIN links ON navigation.link_id = links.id
        ORDER BY navigation.sort_order,navigation.id`
     ).all();
-    return json({ items: result.results });
+    const items = result.results.map((item) => {
+      if (item.code) {
+        item.url = new URL(request.url).origin + "/" + item.code;
+      }
+      return item;
+    });
+
+    return json({ items });
   }
 
   if (path === "/api/admin/navigation" && method === "POST") {
