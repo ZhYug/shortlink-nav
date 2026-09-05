@@ -130,13 +130,14 @@ function filtered() {
 }
 
 function cardHtml(item, index) {
+  const displayUrl = item.code ? location.origin + "/" + item.code : item.url;
   const favorite = state.favorites.includes(item.id);
   const icon = item.icon || iconUrl(item.url);
   let fallback = fallbackIcon(item);
   try { fallback = fallbackIcon(item) || (item.title || new URL(item.url).hostname || "?")[0].toUpperCase(); } catch {}
   return `<article class="nav-card" style="animation:fadeUp .28s ease ${Math.min(index, 10) * 0.035}s both" data-id="${item.id}">
     <div class="nav-top">
-      <a class="nav-card-open" href="${esc(item.url)}" aria-label="打开 ${esc(item.title)}">
+      <a class="nav-card-open" href="${esc(displayUrl)}" aria-label="打开 ${esc(item.title)}">
         <img class="site-icon" src="${esc(icon)}" alt="" onerror="this.outerHTML='<span class=&quot;site-icon site-icon-fallback&quot;>${esc(fallback)}</span>'">
       </a>
       <div class="nav-card-actions">
@@ -144,7 +145,7 @@ function cardHtml(item, index) {
         <button class="favorite ${favorite ? "active" : ""}" data-fav="${item.id}" title="收藏" aria-label="收藏">${favorite ? "★" : "☆"}</button>
       </div>
     </div>
-    <a class="nav-card-content" href="${esc(item.url)}">
+    <a class="nav-card-content" href="${esc(displayUrl)}">
       <h3>${esc(item.title)}</h3>
       <p>${esc(item.description || (() => { try { return new URL(item.url).hostname; } catch { return item.url; } })())}</p>
     </a>
@@ -200,7 +201,7 @@ function render() {
       event.stopPropagation();
       const item = state.items.find((value) => value.id === Number(button.dataset.copy));
       if (!item) return;
-      const ok = await copyText(item.url);
+      const ok = await copyText(item.code ? location.origin + "/" + item.code : item.url);
       button.textContent = ok ? "✓" : "×";
       setTimeout(() => { button.textContent = "⧉"; }, 1200);
     };
@@ -238,7 +239,7 @@ async function copyText(text) {
 function renderRecent() {
   const items = state.recent.map((id) => state.items.find((item) => item.id === id)).filter(Boolean);
   $("#recentGrid").innerHTML = items.length
-    ? items.map((item) => `<a class="recent-item" href="${esc(item.url)}"><img src="${esc(item.icon || iconUrl(item.url))}" alt="" onerror="this.outerHTML='<span class=&quot;recent-icon-fallback&quot;>${esc(fallbackIcon(item))}</span>'"><span>${esc(item.title)}</span></a>`).join("")
+    ? items.map((item) => `<a class="recent-item" href="${esc(item.code ? location.origin + "/" + item.code : item.url)}"><img src="${esc(item.icon || iconUrl(item.url))}" alt="" onerror="this.outerHTML='<span class=&quot;recent-icon-fallback&quot;>${esc(fallbackIcon(item))}</span>'"><span>${esc(item.title)}</span></a>`).join("")
     : '<span style="color:var(--faint);font-size:13px">还没有访问记录</span>';
 }
 

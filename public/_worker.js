@@ -286,6 +286,27 @@ async function handleApi(request, env, ctx, parts) {
           .run();
 
         if (!result.meta?.changes) return json({ error: "短链接不存在" }, 404);
+
+        
+        await env.DB.prepare(
+          `UPDATE navigation
+           SET title=?,
+               description=?,
+               category=?,
+               enabled=?,
+               updated_at=?
+           WHERE link_id=?`
+        )
+          .bind(
+            clean(data.title, 200),
+            clean(data.description, 500),
+            clean(data.category, 80),
+            data.enabled === false ? 0 : 1,
+            now(),
+            id
+          )
+          .run();
+
       } catch (error) {
         if (String(error?.message || "").toLowerCase().includes("unique")) {
           return json({ error: "短码已存在" }, 409);
@@ -306,7 +327,16 @@ async function handleApi(request, env, ctx, parts) {
 
   if (path === "/api/admin/navigation" && method === "GET") {
     const result = await env.DB.prepare(
-      "SELECT * FROM navigation ORDER BY sort_order,id"
+      `SELECT 
+        navigation.*,
+        links.code,
+        links.title AS link_title,
+        links.description AS link_description,
+        links.category AS link_category,
+        links.enabled AS link_enabled
+       FROM navigation
+       LEFT JOIN links ON navigation.link_id = links.id
+       ORDER BY navigation.sort_order,navigation.id`
     ).all();
     return json({ items: result.results });
   }
