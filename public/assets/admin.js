@@ -195,13 +195,13 @@ function renderLinks() {
             <button class="small-btn" data-act="nav" data-id="${item.id}">
               ${linked ? "✓" : "+"}
             </button>
-            <button class="small-btn" data-act="qr" data-id="${item.id}">
+            <button class="small-btn qr-btn" data-act="qr" data-id="${item.id}">
               QR
             </button>
-            <button class="small-btn" data-act="edit" data-id="${item.id}">
+            <button class="small-btn edit-btn" data-act="edit" data-id="${item.id}">
               ✎
             </button>
-            <button class="small-btn danger-btn" data-act="del" data-id="${item.id}">
+            <button class="small-btn danger-btn del-btn" data-act="del" data-id="${item.id}">
               ×
             </button>
           </div>

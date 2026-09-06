@@ -311,3 +311,44 @@ html[data-theme="light"]{--bg:#f4f6fb;--bg2:#eef1f7;--surface:rgba(255,255,255,.
 
 }
 
+
+
+/* mobile action buttons compact */
+@media(max-width:600px){
+
+.link-dense-row .row-actions{
+ display:flex!important;
+ gap:4px!important;
+ justify-content:flex-end;
+}
+
+.link-dense-row .small-btn{
+ width:30px!important;
+ height:30px!important;
+ min-width:30px!important;
+ padding:0!important;
+ display:flex;
+ align-items:center;
+ justify-content:center;
+ font-size:12px;
+}
+
+.link-dense-row .qr-btn{
+ font-size:10px;
+}
+
+.link-dense-row .edit-btn{
+ font-size:15px;
+}
+
+.link-dense-row .del-btn{
+ font-size:18px;
+}
+
+.click-count{
+ min-width:20px;
+ text-align:center;
+}
+
+}
+
