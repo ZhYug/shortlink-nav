@@ -164,3 +164,52 @@ html[data-theme="light"]{--bg:#f4f6fb;--bg2:#eef1f7;--surface:rgba(255,255,255,.
 }
 
 }
+
+
+/* mobile admin layout final spacing fix */
+@media(max-width:600px){
+
+.admin-layout{
+  background:var(--bg);
+  min-height:100vh;
+}
+
+.sidebar{
+  position:sticky;
+  top:0;
+}
+
+.admin-main{
+  padding-top:20px;
+  background:var(--bg);
+}
+
+.admin-header{
+  position:relative;
+  top:auto;
+  height:auto;
+  min-height:70px;
+  margin-bottom:20px;
+  padding:12px 0;
+  background:transparent;
+  border-bottom:1px solid var(--border);
+}
+
+.admin-header h1{
+  font-size:22px;
+}
+
+.admin-section{
+  width:100%;
+}
+
+.dashboard-grid{
+  margin-top:10px;
+}
+
+.panel{
+  width:100%;
+  box-sizing:border-box;
+}
+
+}
