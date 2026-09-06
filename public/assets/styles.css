@@ -107,3 +107,60 @@ html[data-theme="light"]{--bg:#f4f6fb;--bg2:#eef1f7;--surface:rgba(255,255,255,.
 }
 
 
+
+
+/* mobile admin dashboard overflow fix */
+@media(max-width:600px){
+
+.admin-main{
+  width:100%;
+  max-width:100%;
+  overflow-x:hidden;
+}
+
+.dashboard-grid{
+  grid-template-columns:1fr;
+  width:100%;
+}
+
+.dashboard-grid .panel{
+  min-width:0;
+  width:100%;
+  overflow:hidden;
+}
+
+.panel{
+  min-width:0;
+}
+
+.chart-wrap{
+  width:100%;
+  max-width:100%;
+  overflow:hidden;
+  box-sizing:border-box;
+}
+
+.chart-wrap canvas{
+  max-width:100%!important;
+}
+
+.mini-list{
+  width:100%;
+  box-sizing:border-box;
+  overflow:hidden;
+}
+
+.mini-row{
+  min-width:0;
+  width:100%;
+}
+
+.mini-row strong,
+.mini-row span,
+.mini-row small{
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+
+}
