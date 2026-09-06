@@ -169,30 +169,31 @@ function renderLinks() {
     const linked = linkedNav(item);
 
     return `
-      <tr class="link-card-row">
-        <td data-label="短码">
-          <div class="link-mini-title">
-            <strong>/${esc(item.code)}</strong>
-            <span>${item.clicks || 0} 次访问</span>
-          </div>
+      <tr class="link-dense-row">
+        <td>
+          <strong>/${esc(item.code)}</strong>
         </td>
 
-        <td data-label="目标">
-          <div class="link-target">
+        <td>
+          <div class="link-dense-title">
             ${esc(item.title || item.url)}
           </div>
         </td>
 
-        <td data-label="状态">
+        <td>
           <span class="status ${item.enabled ? "on" : "off"}">
-            ${item.enabled ? "启用" : "停用"}
+          ${item.enabled ? "启用" : "停用"}
           </span>
         </td>
 
-        <td data-label="操作">
+        <td>
+          <span class="click-count">${item.clicks || 0}</span>
+        </td>
+
+        <td>
           <div class="row-actions compact-actions">
             <button class="small-btn" data-act="nav" data-id="${item.id}">
-              ${linked ? "✓导航" : "+导航"}
+              ${linked ? "✓" : "+"}
             </button>
             <button class="small-btn" data-act="qr" data-id="${item.id}">
               QR
@@ -207,7 +208,7 @@ function renderLinks() {
         </td>
       </tr>`;
   }).join("") ||
-  '<tr><td colspan="4" style="text-align:center;padding:40px">暂无短链接</td></tr>';
+  '<tr><td colspan="5" style="text-align:center;padding:30px">暂无短链接</td></tr>';
 }
 
 $("#linkSearch").oninput = renderLinks;
