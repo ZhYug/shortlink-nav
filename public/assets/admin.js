@@ -157,24 +157,57 @@ function linkedNav(item) {
 
 function renderLinks() {
   const query = ($("#linkSearch")?.value || "").toLowerCase();
-  const rows = A.links.filter((item) => [item.code, item.url, item.title, item.category].join(" ").toLowerCase().includes(query));
+
+  const rows = A.links.filter((item) =>
+    [item.code, item.url, item.title, item.category]
+      .join(" ")
+      .toLowerCase()
+      .includes(query)
+  );
+
   $("#linksTable").innerHTML = rows.map((item) => {
     const linked = linkedNav(item);
+
     return `
-      <tr>
-        <td data-label="短码"><strong>/${esc(item.code)}</strong></td>
-        <td data-label="目标"><div class="link-target">${esc(item.title || item.url)}</div></td>
-        <td data-label="分类">${esc(item.category || "—")}</td>
-        <td data-label="点击">${item.clicks || 0}</td>
-        <td data-label="状态"><span class="status ${item.enabled ? "on" : "off"}">${item.enabled ? "启用" : "停用"}</span></td>
-        <td data-label="操作"><div class="row-actions">
-          <button class="small-btn" data-act="nav" data-id="${item.id}">${linked ? "已在导航" : "加入导航"}</button>
-          <button class="small-btn" data-act="qr" data-id="${item.id}">QR</button>
-          <button class="small-btn" data-act="edit" data-id="${item.id}">编辑</button>
-          <button class="small-btn danger-btn" data-act="del" data-id="${item.id}">删除</button>
-        </div></td>
+      <tr class="link-card-row">
+        <td data-label="短码">
+          <div class="link-mini-title">
+            <strong>/${esc(item.code)}</strong>
+            <span>${item.clicks || 0} 次访问</span>
+          </div>
+        </td>
+
+        <td data-label="目标">
+          <div class="link-target">
+            ${esc(item.title || item.url)}
+          </div>
+        </td>
+
+        <td data-label="状态">
+          <span class="status ${item.enabled ? "on" : "off"}">
+            ${item.enabled ? "启用" : "停用"}
+          </span>
+        </td>
+
+        <td data-label="操作">
+          <div class="row-actions compact-actions">
+            <button class="small-btn" data-act="nav" data-id="${item.id}">
+              ${linked ? "✓导航" : "+导航"}
+            </button>
+            <button class="small-btn" data-act="qr" data-id="${item.id}">
+              QR
+            </button>
+            <button class="small-btn" data-act="edit" data-id="${item.id}">
+              ✎
+            </button>
+            <button class="small-btn danger-btn" data-act="del" data-id="${item.id}">
+              ×
+            </button>
+          </div>
+        </td>
       </tr>`;
-  }).join("") || '<tr><td colspan="6" style="text-align:center;padding:40px">暂无短链接</td></tr>';
+  }).join("") ||
+  '<tr><td colspan="4" style="text-align:center;padding:40px">暂无短链接</td></tr>';
 }
 
 $("#linkSearch").oninput = renderLinks;
