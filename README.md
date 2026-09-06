@@ -1,7 +1,6 @@
 # ShortLink Nav V3.1
 
 Cloudflare Pages + Pages Functions + D1 的短链接 / 导航一体化项目。此版本基于 V3 重构，修复后台登录、/admin 路由、自定义图标、首页标题设置、短码编辑校验和数据库错误处理。
-短短j
 
 
 ## V3.1 主要修复
