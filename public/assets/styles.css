@@ -213,3 +213,40 @@ html[data-theme="light"]{--bg:#f4f6fb;--bg2:#eef1f7;--surface:rgba(255,255,255,.
 }
 
 }
+
+
+/* mobile shortlink table keep one line */
+@media(max-width:600px){
+
+.link-dense-row{
+  display:table-row!important;
+}
+
+.link-dense-row td{
+  display:table-cell!important;
+  width:auto!important;
+  padding:8px 6px!important;
+  border-bottom:1px solid var(--border)!important;
+  white-space:nowrap;
+}
+
+.link-dense-row td::before{
+  display:none!important;
+}
+
+.link-dense-row .link-dense-title{
+  max-width:120px;
+}
+
+.link-dense-row .row-actions{
+  display:flex!important;
+  flex-wrap:nowrap!important;
+}
+
+.link-dense-row .small-btn{
+  min-height:28px!important;
+  padding:3px 6px!important;
+  font-size:11px;
+}
+
+}
