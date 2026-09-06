@@ -352,3 +352,77 @@ html[data-theme="light"]{--bg:#f4f6fb;--bg2:#eef1f7;--surface:rgba(255,255,255,.
 
 }
 
+
+
+/* mobile shortlink list true one line */
+@media(max-width:600px){
+
+.link-dense-row{
+  display:flex!important;
+  align-items:center;
+  gap:6px;
+  padding:10px 8px!important;
+  min-height:52px;
+  overflow:hidden;
+}
+
+.link-dense-row td{
+  display:block!important;
+  border:0!important;
+  padding:0!important;
+}
+
+.link-dense-row td:nth-child(1){
+  flex:0 0 75px;
+}
+
+.link-dense-row td:nth-child(2){
+  flex:1;
+  min-width:0;
+}
+
+.link-dense-row td:nth-child(3){
+  flex:0 0 42px;
+}
+
+.link-dense-row td:nth-child(4){
+  flex:0 0 28px;
+}
+
+.link-dense-row td:nth-child(5){
+  flex:0 0 auto;
+}
+
+.link-dense-title{
+  max-width:100%;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+
+.link-dense-row .compact-actions{
+  display:flex;
+  gap:3px;
+  flex-wrap:nowrap;
+}
+
+.link-dense-row .small-btn{
+  width:30px;
+  height:30px;
+  min-width:30px;
+  padding:0;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+
+.link-dense-row .qr-btn{
+  font-size:11px;
+}
+
+.link-dense-row .edit-btn,
+.link-dense-row .danger-btn{
+  font-size:16px;
+}
+
+}
