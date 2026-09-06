@@ -405,9 +405,9 @@ async function handleApi(request, env, ctx, parts) {
       const shortUrl = requestUrl.origin + "/" + link.code;
 
       const icon =
-        "https://www.google.com/s2/favicons?domain=" +
-        encodeURIComponent(link.url) +
-        "&sz=128";
+        "https://icons.duckduckgo.com/ip3/" +
+        encodeURIComponent(new URL(link.url).hostname) +
+        ".ico";
 
       await env.DB.prepare(
         `INSERT INTO navigation

@@ -263,8 +263,12 @@ $("#addLinkBtn").onclick = () => linkModal();
 $("#addNavBtn").onclick = () => navModal();
 
 function iconUrl(url) {
-  try { return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(new URL(url).hostname)}&sz=64`; }
-  catch { return ""; }
+  try {
+    const host = new URL(url).hostname;
+    return `https://icons.duckduckgo.com/ip3/${host}.ico`;
+  } catch {
+    return "";
+  }
 }
 
 function fallbackIcon(item) {
