@@ -19,6 +19,13 @@ const ALLOWED_SETTINGS = [
   "hero_title",
   "hero_description",
   "accent",
+  "nav_tag_style",
+  "nav_columns_mobile",
+  "nav_columns_tablet",
+  "nav_columns_desktop",
+  "nav_columns_wide",
+  "nav_category_order",
+  "nav_hidden_categories",
 ];
 
 function randomCode(n = 7) {
