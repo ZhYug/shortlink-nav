@@ -240,7 +240,7 @@ async function handleApi(request, env, ctx, parts) {
     ).all();
     const items = result.results.map((item) => {
       if (item.code) {
-        item.url = new URL(request.url).origin + "/" + item.code;
+        item.short_url = new URL(request.url).origin + "/" + item.code;
       }
       return item;
     });
@@ -369,7 +369,7 @@ async function handleApi(request, env, ctx, parts) {
     ).all();
     const items = result.results.map((item) => {
       if (item.code) {
-        item.url = new URL(request.url).origin + "/" + item.code;
+        item.short_url = new URL(request.url).origin + "/" + item.code;
       }
       return item;
     });
