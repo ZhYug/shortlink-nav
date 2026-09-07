@@ -280,34 +280,64 @@ async function deleteLink(item) {
 }
 
 function qrModal(item) {
-  openModal("短链接二维码", `
-    <div style="text-align:center"><div class="qr-box"><canvas id="qrCanvas"></canvas></div><strong>/${esc(item.code)}</strong><p style="color:var(--muted);word-break:break-all">${esc(location.origin + "/" + item.code)}</p><button class="btn primary" id="downloadQr">下载二维码</button></div>
-  `);
-  let canvas = null;
+  openModal(
+    "短链接二维码",
+    `
+    <div style="text-align:center">
+      <div class="qr-box">
+        <canvas id="qrCanvas"></canvas>
+      </div>
+      <strong>/${esc(item.code)}</strong>
+      <p style="color:var(--muted);word-break:break-all">
+        ${esc(location.origin + "/" + item.code)}
+      </p>
+      <button class="btn primary" id="downloadQr">
+        下载二维码
+      </button>
+    </div>
+    `
+  );
 
   setTimeout(() => {
-    const canvas = $("#qrCanvas");
+    const canvas = document.getElementById("qrCanvas");
 
     if (!canvas) {
       toast("二维码容器不存在");
       return;
     }
 
+    if (typeof QRCode === "undefined") {
+      toast("二维码库未加载");
+      return;
+    }
+
     QRCode.toCanvas(
       canvas,
       `${location.origin}/${item.code}`,
-      { width: 220, margin: 1 },
-      (error) => {
-        if (error) toast("二维码生成失败");
+      {
+        width:220,
+        margin:1
+      },
+      (error)=>{
+        if(error){
+          console.error("QRCode error:", error);
+          toast("二维码生成失败");
+        }
       }
     );
-  }, 50);
-  $("#downloadQr").onclick = () => {
-    const link = document.createElement("a");
-    link.href = $("#qrCanvas").toDataURL("image/png");
-    link.download = `${item.code}-qrcode.png`;
-    link.click();
-  };
+
+    const btn = document.getElementById("downloadQr");
+
+    if(btn){
+      btn.onclick = ()=>{
+        const link=document.createElement("a");
+        link.href=canvas.toDataURL("image/png");
+        link.download=`${item.code}-qrcode.png`;
+        link.click();
+      };
+    }
+
+  },100);
 }
 
 $("#addLinkBtn").onclick = () => linkModal();
