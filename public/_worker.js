@@ -12,6 +12,7 @@ const json = (data, status = 200, headers = {}) =>
 const now = () => new Date().toISOString();
 const b62 = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const CODE_RE = /^[A-Za-z0-9_-]{2,64}$/;
+const RESERVED_CODES = new Set(["admin", "api"]);
 const ALLOWED_SETTINGS = [
   "site_title",
   "site_subtitle",
@@ -238,12 +239,11 @@ async function handleApi(request, env, ctx, parts) {
     const result = await env.DB.prepare(
       "SELECT * FROM links ORDER BY created_at DESC,id DESC"
     ).all();
-    const items = result.results.map((item) => {
-      if (item.code) {
-        item.short_url = new URL(request.url).origin + "/" + item.code;
-      }
-      return item;
-    });
+    const origin = new URL(request.url).origin;
+    const items = result.results.map((item) => ({
+      ...item,
+      short_url: item.code ? `${origin}/${item.code}` : "",
+    }));
 
     return json({ items });
   }
@@ -256,6 +256,9 @@ async function handleApi(request, env, ctx, parts) {
     const code = clean(data.code, 64) || (await uniqueCode(env));
     if (!CODE_RE.test(code)) {
       return json({ error: "短码格式不合法：仅允许 2-64 位字母、数字、_、-" }, 400);
+    }
+    if (RESERVED_CODES.has(code.toLowerCase())) {
+      return json({ error: `短码 ${code} 为系统保留字，请换一个` }, 400);
     }
 
     try {
@@ -294,6 +297,9 @@ async function handleApi(request, env, ctx, parts) {
 
       if (!CODE_RE.test(code)) {
         return json({ error: "短码格式不合法：仅允许 2-64 位字母、数字、_、-" }, 400);
+      }
+      if (RESERVED_CODES.has(code.toLowerCase())) {
+        return json({ error: `短码 ${code} 为系统保留字，请换一个` }, 400);
       }
       if (!validUrl(url)) return json({ error: "URL 必须是 http/https" }, 400);
 
@@ -367,12 +373,14 @@ async function handleApi(request, env, ctx, parts) {
        LEFT JOIN links ON navigation.link_id = links.id
        ORDER BY navigation.sort_order,navigation.id`
     ).all();
-    const items = result.results.map((item) => {
-      if (item.code) {
-        item.short_url = new URL(request.url).origin + "/" + item.code;
-      }
-      return item;
-    });
+    const origin = new URL(request.url).origin;
+    const items = result.results.map((item) => ({
+      ...item,
+      short_url: item.code ? `${origin}/${item.code}` : "",
+      // 对关联短链接的导航，url 是实际可点击的短链接地址；
+      // 手动导航则保留数据库中的目标 URL。
+      url: item.code ? `${origin}/${item.code}` : item.url,
+    }));
 
     return json({ items });
   }
@@ -478,6 +486,12 @@ async function handleApi(request, env, ctx, parts) {
     const ids = data.ids.map(Number);
     if (new Set(ids).size !== ids.length) return json({ error: "排序数据存在重复项目" }, 400);
 
+    const existing = await env.DB.prepare("SELECT id FROM navigation").all();
+    const existingIds = new Set(existing.results.map((row) => Number(row.id)));
+    if (ids.length !== existingIds.size || ids.some((id) => !existingIds.has(id))) {
+      return json({ error: "排序数据必须包含全部且仅包含现有导航项目" }, 400);
+    }
+
     const statements = ids.map((id, index) =>
       env.DB.prepare("UPDATE navigation SET sort_order=?,updated_at=? WHERE id=?")
         .bind(index, now(), id)
@@ -492,6 +506,16 @@ async function handleApi(request, env, ctx, parts) {
 
     if (method === "PUT") {
       const data = await body(request);
+      const current = await env.DB.prepare(
+        "SELECT id,link_id FROM navigation WHERE id=?"
+      ).bind(id).first();
+      if (!current) return json({ error: "导航不存在" }, 404);
+
+      // 关联短链接的导航是短链接的只读投影，避免把短链接 URL 当成真实目标 URL 写回 links。
+      if (current.link_id) {
+        return json({ error: "此导航已关联短链接，请在「短链接」中编辑内容" }, 409);
+      }
+
       const title = clean(data.title, 120);
       const url = clean(data.url, 2000);
       if (!title || !validUrl(url)) return json({ error: "标题和有效 URL 必填" }, 400);

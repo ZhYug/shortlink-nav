@@ -440,12 +440,12 @@ function navModal(item = null) {
   openModal(item ? "编辑导航" : "添加导航", `
     <form class="modal-form" id="navForm">
       <div class="two"><label>标题<input name="title" required value="${esc(item?.title || "")}"></label><label>分类<input name="category" value="${esc(item?.category || "")}" placeholder="工具"></label></div>
-      <label>URL<input name="url" required value="${esc(item?.url || "")}"></label>
+      <label>目标 URL<input name="url" required value="${esc(item?.url || "")}" ${item?.link_id ? "readonly" : ""}></label>
       <label>描述<textarea name="description" rows="3">${esc(item?.description || "")}</textarea></label>
       <label>图标 URL（可选）<input name="icon" value="${esc(item?.icon || "")}" placeholder="留空自动使用网站 favicon"></label>
-      ${item?.link_id ? '<div class="form-note">此导航已关联短链接。短链接修改后，标题、描述、地址、分类和状态会自动同步。</div>' : ''}
+      ${item?.link_id ? '<div class="form-note">此导航已关联短链接。请在「短链接」中编辑；导航会自动同步，避免把短链接地址误当成真实目标 URL。</div>' : ''}
       <label class="checkbox"><input name="enabled" type="checkbox" ${item?.enabled !== false ? "checked" : ""}> 启用</label>
-      <button class="btn primary">保存</button>
+      ${item?.link_id ? '<button type="button" class="btn" id="linkedNavClose">关闭</button>' : '<button class="btn primary">保存</button>'}
     </form>
   `);
   $("#navForm").onsubmit = async (event) => {
@@ -453,7 +453,7 @@ function navModal(item = null) {
     const form = new FormData(event.target);
     const data = Object.fromEntries(form.entries());
     data.enabled = form.get("enabled") === "on";
-    if (item?.link_id) data.link_id = item.link_id;
+    if (item?.link_id) return;
     try {
       await api(item ? `/api/admin/navigation/${item.id}` : "/api/admin/navigation", {
         method: item ? "PUT" : "POST",
@@ -462,6 +462,9 @@ function navModal(item = null) {
       closeModal(); toast("已保存"); await loadAll();
     } catch (error) { toast(error.message); }
   };
+  if (item?.link_id) {
+    $("#linkedNavClose").onclick = closeModal;
+  }
 }
 
 async function deleteNav(item) {

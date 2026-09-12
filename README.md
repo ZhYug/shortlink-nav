@@ -100,3 +100,12 @@ shortlink-nav-v3.1/
 
 ## V3.1 Fixed deployment
 This version uses Cloudflare Pages Advanced Mode via `public/_worker.js`. The old `functions/[[path]].js` directory has been removed to avoid the Pages build error `No routes found when building Functions directory`.
+
+## 3.1.1 修正版
+
+本版本修复了以下问题：
+- 管理后台短链接列表不再把真实目标 URL 覆盖成短链接 URL，避免编辑后形成跳转死循环。
+- 管理后台 API 增加 `short_url` 字段，区分真实目标与短链接地址。
+- 关联短链接的导航禁止直接编辑，统一从短链接管理中修改并自动同步。
+- 短码 `admin`、`api` 作为系统保留字禁止创建/修改。
+- 导航拖拽排序会校验 ID 必须完整且唯一，避免提交无效排序数据。
