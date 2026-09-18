@@ -7,9 +7,8 @@
   "scripts": {
     "dev": "npm run build && wrangler pages dev public",
     "build": "node scripts/build.mjs",
-    "deploy": "npm run build && wrangler pages deploy public",
+    "deploy": "npm run build && wrangler pages deploy public --project-name st-nav",
     "db:migrate:local": "npm run build && wrangler d1 migrations apply st-nav --local",
-    "db:migrate:remote": "node scripts/migrate-remote.mjs",
     "doctor": "node scripts/doctor.mjs"
   },
   "devDependencies": {

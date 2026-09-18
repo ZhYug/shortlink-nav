@@ -66,8 +66,7 @@ st-nav/
 ├── .dev.vars.example
 ├── .gitignore
 ├── .nvmrc
-├── package.json
-└── wrangler.toml
+└── package.json
 ```
 
 > **不要删除 `public/_worker.js`。** Pages Advanced Mode 使用它接管请求，并通过 `env.ASSETS.fetch()` 返回静态资源。
@@ -168,7 +167,7 @@ CLOUDFLARE_ACCOUNT_ID
 
 这里是本项目和普通静态 Pages 项目的主要区别。
 
-Cloudflare Pages 的 GitHub Build 本身不能在没有 Cloudflare 控制面认证的情况下直接执行远程 `wrangler d1 migrations apply --remote`；D1 Wrangler 命令通过 Cloudflare API 操作控制面。为了实现你要求的“仓库零 API Token”，本项目把 migration 执行器放进 Pages Worker，通过已经绑定的 `DB` D1 Binding 完成初始化。Cloudflare D1 Worker API 支持直接执行 SQL，`batch()` 还是事务性的；`exec()` 也支持多条 SQL，但本项目使用 `batch()` 执行实际 migration。 citeturn0search1turn0search12
+本项目不在 GitHub 仓库保存 D1 `database_id`，也不要求 Cloudflare API Token。构建阶段只把 `migrations/*.sql` 嵌入 Pages Worker；真正运行时由已经绑定的 `DB` D1 Binding 执行 SQL migration。
 
 第一次真正访问网站/API 时：
 
@@ -234,32 +233,24 @@ npm run build
 
 ## 五、CLI 部署（可选）
 
-如果你不使用 Cloudflare GitHub 集成，而是在自己的电脑上直接部署，可以：
+如果不使用 Cloudflare GitHub 集成，也可以在本地通过 Wrangler 部署：
 
 ```bash
 npx wrangler login
 npm run deploy
 ```
 
-这个命令执行标准 Pages 部署：
+这个命令只负责标准 Pages 部署：
 
 ```text
 npm run build
       ↓
 生成 public/_worker.js
       ↓
-wrangler pages deploy public
+wrangler pages deploy public --project-name st-nav
 ```
 
-运行时仍然会通过 D1 Binding 自动初始化/升级数据库。
-
-如果你确实希望在 CLI 部署前就直接执行 Cloudflare 远程 migration，也可以使用：
-
-```bash
-D1_DATABASE_ID=你的D1数据库UUID npm run db:migrate:remote
-```
-
-但这属于**可选的、需要 Cloudflare 控制面认证的运维方式**，Cloudflare Dashboard GitHub 部署不依赖它。
+运行时数据库仍然要求 Pages 的 `DB` Binding 已经存在。Dashboard GitHub 部署不使用这个脚本。
 
 ## 六、数据库与首次部署说明
 
@@ -325,10 +316,11 @@ Worker 会在第一次需要数据库的请求中自动初始化数据库，并�
 检查：
 
 1. Cloudflare Pages 是否成功完成 Build；
-2. Pages 的 `DB` Binding 是否绑定到正确的 D1；
-5. `ADMIN_PASSWORD` 是否存在；
-6. `SESSION_SECRET` 是否存在；
-7. 最新 Pages Deployment 是否成功。
+2. Pages → Settings → Bindings 中是否存在 `DB` D1 binding；
+3. `DB` 是否绑定到正确的 D1；
+4. `ADMIN_PASSWORD` 是否存在；
+5. `SESSION_SECRET` 是否存在；
+6. 添加或修改 Binding 后是否重新部署。
 
 ### 登录提示未配置管理员密码
 

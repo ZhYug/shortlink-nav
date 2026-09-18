@@ -6,10 +6,9 @@ const fail = (message) => {
   process.exitCode = 1;
 };
 
-console.log('🔎 ST Nav 1.0.0 Cloudflare Pages + D1 检查\n');
+console.log('🔎 ST Nav 1.0.0 Cloudflare Pages Dashboard + D1 检查\n');
 
 const requiredFiles = [
-  'wrangler.toml',
   'package.json',
   'public/_worker.js',
   'scripts/worker.template.js',
@@ -28,6 +27,14 @@ for (const file of requiredFiles) {
   if (!existsSync(file)) fail(`缺少 ${file}`);
 }
 
+if (existsSync('wrangler.toml') || existsSync('wrangler.json') || existsSync('wrangler.jsonc')) {
+  fail('Dashboard 版项目不应包含 Wrangler 项目配置文件；D1 Binding 应在 Cloudflare Pages Dashboard 管理。');
+}
+
+if (existsSync('.wrangler.deploy.toml')) {
+  fail('发现临时 .wrangler.deploy.toml，请删除后再提交。');
+}
+
 const migrationChecks = [
   ['migrations/0001_initial.sql', /CREATE TABLE IF NOT EXISTS links/, '0001 缺少 links 初始表结构'],
   ['migrations/0002_link_favorites.sql', /ALTER TABLE links ADD COLUMN favorite/, '0002 缺少短链接收藏字段'],
@@ -37,24 +44,13 @@ for (const [file, pattern, message] of migrationChecks) {
   if (existsSync(file) && !pattern.test(readFileSync(file, 'utf8'))) fail(message);
 }
 
-if (existsSync('wrangler.toml')) {
-  const config = readFileSync('wrangler.toml', 'utf8');
-  if (!/pages_build_output_dir\s*=\s*["']\.\/public["']/.test(config)) fail('Pages build output directory 未指向 ./public');
-  if (/^\s*main\s*=\s*/m.test(config)) fail('Pages 配置不应使用 main = ... Workers 入口');
-  if (/^\s*\[assets\]/m.test(config)) fail('Pages 配置不应使用 [assets] Workers Static Assets 配置');
-  if (/^\s*database_id\s*=/m.test(config)) fail('仓库配置不应保存 database_id');
-  if (/^\s*\[\[d1_databases\]\]/m.test(config)) fail('D1 binding 应在 Cloudflare Pages Dashboard 配置，而不是仓库中保存数据库 ID');
-  if (!/ST_NAV_VERSION\s*=\s*["']1\.0\.0["']/.test(config)) fail('wrangler.toml 版本号不是 1.0.0');
-  console.log('✓ Pages 配置不保存 D1 database_id');
-}
-
 if (existsSync('package.json')) {
   const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
   if (pkg.version !== '1.0.0') fail('package.json 版本号不是 1.0.0');
   if (pkg.scripts?.dev !== 'npm run build && wrangler pages dev public') fail('本地 dev 脚本未先生成 Worker');
   if (pkg.scripts?.build !== 'node scripts/build.mjs') fail('build 脚本未生成运行时 migration Worker');
-  if (pkg.scripts?.deploy !== 'npm run build && wrangler pages deploy public') fail('deploy 脚本未使用标准 Pages 部署流程');
-  if (!pkg.scripts?.['db:migrate:remote']) fail('缺少可选的远程 migration CLI 脚本');
+  if (pkg.scripts?.deploy !== 'npm run build && wrangler pages deploy public --project-name st-nav') fail('CLI deploy 脚本配置异常');
+  if (pkg.scripts?.['db:migrate:remote']) fail('Dashboard 版不应保留远程 Wrangler migration 脚本');
   console.log('✓ package.json / Dashboard Build 流程配置正确');
 }
 
@@ -87,5 +83,6 @@ if (existsSync('public/_worker.js')) {
 if (process.exitCode) process.exit(process.exitCode);
 
 console.log('\n✓ 项目检查完成');
-console.log('ℹ️ Cloudflare Dashboard 只需绑定 DB、ADMIN_PASSWORD、SESSION_SECRET；不需要 D1_DATABASE_ID。');
-console.log('ℹ️ Git 集成部署时不调用 Cloudflare 控制面 API；D1 表结构/初始数据会在首次请求触发时自动初始化，后续请求自动应用新增 migration。');
+console.log('ℹ️ Cloudflare Dashboard：只需创建 D1、绑定 DB，并设置 ADMIN_PASSWORD / SESSION_SECRET。');
+console.log('ℹ️ Git 集成部署使用 Build command: npm run build；无需 D1_DATABASE_ID 或 Cloudflare API Token。');
+console.log('ℹ️ 首次访问时 Worker 通过 DB Binding 自动执行 migrations；后续请求自动应用新增 migration。');
