@@ -5,23 +5,7 @@ const SESSION_TTL = 86400;
 const PUBLIC_CACHE_CONTROL = "public, max-age=0, s-maxage=30, stale-while-revalidate=60";
 const databaseReady = new WeakMap();
 const REQUIRED_TABLES = ["links", "link_daily_stats", "navigation", "settings"];
-const RUNTIME_MIGRATIONS = [
-  {
-    "id": "0001",
-    "file": "0001_initial.sql",
-    "sql": "-- Initial D1 schema.\n\nPRAGMA foreign_keys = ON;\n\nCREATE TABLE IF NOT EXISTS links (\n  id INTEGER PRIMARY KEY,\n  code TEXT NOT NULL UNIQUE COLLATE BINARY,\n  url TEXT NOT NULL,\n  title TEXT,\n  description TEXT,\n  category TEXT,\n  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),\n  clicks INTEGER NOT NULL DEFAULT 0 CHECK (clicks >= 0),\n  last_clicked_at TEXT,\n  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP\n);\nCREATE INDEX IF NOT EXISTS idx_links_enabled ON links(enabled);\nCREATE INDEX IF NOT EXISTS idx_links_clicks ON links(clicks DESC);\nCREATE INDEX IF NOT EXISTS idx_links_created_at ON links(created_at DESC, id DESC);\n\nCREATE TABLE IF NOT EXISTS link_daily_stats (\n  link_id INTEGER NOT NULL,\n  day TEXT NOT NULL,\n  clicks INTEGER NOT NULL DEFAULT 0 CHECK (clicks >= 0),\n  PRIMARY KEY (link_id, day),\n  FOREIGN KEY (link_id) REFERENCES links(id) ON DELETE CASCADE\n);\nCREATE INDEX IF NOT EXISTS idx_link_daily_stats_day ON link_daily_stats(day);\n\nCREATE TABLE IF NOT EXISTS navigation (\n  id INTEGER PRIMARY KEY,\n  title TEXT NOT NULL,\n  description TEXT,\n  url TEXT NOT NULL,\n  icon TEXT,\n  category TEXT,\n  sort_order INTEGER NOT NULL DEFAULT 0,\n  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),\n  link_id INTEGER,\n  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  FOREIGN KEY (link_id) REFERENCES links(id) ON DELETE CASCADE\n);\nCREATE INDEX IF NOT EXISTS idx_navigation_enabled_order ON navigation(enabled, sort_order, id);\nCREATE INDEX IF NOT EXISTS idx_navigation_link_id ON navigation(link_id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_navigation_link_unique\n  ON navigation(link_id)\n  WHERE link_id IS NOT NULL;\n\nCREATE TABLE IF NOT EXISTS settings (\n  key TEXT PRIMARY KEY,\n  value TEXT NOT NULL\n);\n\nINSERT OR IGNORE INTO settings(key, value) VALUES\n  ('site_title', 'My Navigation'),\n  ('site_subtitle', 'Personal navigation & short links'),\n  ('site_description', 'Everything you need, one click away.'),\n  ('hero_title', 'Everything you need, one click away.'),\n  ('hero_description', 'A fast, elegant home for your frequently used websites.'),\n  ('accent', '#8b6cff'),\n  ('nav_tag_style', 'pills'),\n  ('nav_columns_mobile', '2'),\n  ('nav_columns_tablet', '3'),\n  ('nav_columns_desktop', '4'),\n  ('nav_columns_wide', '6'),\n  ('nav_category_order', ''),\n  ('nav_hidden_categories', '');\n\nINSERT INTO navigation(title, description, url, icon, category, sort_order, enabled)\nSELECT 'GitHub', '代码仓库与开源项目', 'https://github.com', '', '开发', 0, 1\nWHERE NOT EXISTS (SELECT 1 FROM navigation);\nINSERT INTO navigation(title, description, url, icon, category, sort_order, enabled)\nSELECT 'Google', '搜索与常用服务', 'https://www.google.com', '', '工具', 1, 1\nWHERE (SELECT COUNT(*) FROM navigation) = 1;\nINSERT INTO navigation(title, description, url, icon, category, sort_order, enabled)\nSELECT 'Cloudflare', '网络与边缘服务', 'https://dash.cloudflare.com', '', '开发', 2, 1\nWHERE (SELECT COUNT(*) FROM navigation) = 2;\nINSERT INTO navigation(title, description, url, icon, category, sort_order, enabled)\nSELECT 'ChatGPT', 'AI 助手', 'https://chatgpt.com', '', 'AI', 3, 1\nWHERE (SELECT COUNT(*) FROM navigation) = 3;\n\nPRAGMA user_version = 3;"
-  },
-  {
-    "id": "0002",
-    "file": "0002_link_favorites.sql",
-    "sql": "-- Add persistent favorites for short links.\nALTER TABLE links ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0 CHECK (favorite IN (0, 1));\nCREATE INDEX IF NOT EXISTS idx_links_favorite ON links(favorite DESC, id DESC);"
-  },
-  {
-    "id": "0003",
-    "file": "0003_navigation_favorites.sql",
-    "sql": "-- Add persistent favorites for navigation entries.\nALTER TABLE navigation ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0 CHECK (favorite IN (0, 1));\nCREATE INDEX IF NOT EXISTS idx_navigation_favorite ON navigation(favorite DESC, sort_order ASC, id ASC);"
-  }
-];
+const RUNTIME_MIGRATIONS = __RUNTIME_MIGRATIONS__;
 
 function splitSqlStatements(sql) {
   const statements = [];

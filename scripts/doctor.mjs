@@ -6,21 +6,21 @@ const fail = (message) => {
   process.exitCode = 1;
 };
 
-console.log('🔎 ST Nav 1.0.0 Pages Advanced Mode 检查\n');
+console.log('🔎 ST Nav 1.0.0 Cloudflare Pages + D1 检查\n');
 
 const requiredFiles = [
   'wrangler.toml',
   'package.json',
   'public/_worker.js',
+  'scripts/worker.template.js',
+  'scripts/build.mjs',
   'public/index.html',
   'public/admin.html',
   'public/.assetsignore',
-  'migrations/0001_initial.sql',
   '.dev.vars.example',
+  'migrations/0001_initial.sql',
   'migrations/0002_link_favorites.sql',
   'migrations/0003_navigation_favorites.sql',
-  'scripts/deploy.mjs',
-  'scripts/migrate-remote.mjs',
   '.gitignore',
 ];
 
@@ -37,32 +37,25 @@ for (const [file, pattern, message] of migrationChecks) {
   if (existsSync(file) && !pattern.test(readFileSync(file, 'utf8'))) fail(message);
 }
 
-for (const file of ['src/worker.js', 'scripts/pages-build.mjs']) {
-  if (existsSync(file)) fail(`存在不需要的冗余文件 ${file}`);
-}
-
 if (existsSync('wrangler.toml')) {
   const config = readFileSync('wrangler.toml', 'utf8');
   if (!/pages_build_output_dir\s*=\s*["']\.\/public["']/.test(config)) fail('Pages build output directory 未指向 ./public');
   if (/^\s*main\s*=\s*/m.test(config)) fail('Pages 配置不应使用 main = ... Workers 入口');
   if (/^\s*\[assets\]/m.test(config)) fail('Pages 配置不应使用 [assets] Workers Static Assets 配置');
-  if (!/binding\s*=\s*["']DB["']/.test(config) || !/database_name\s*=/.test(config)) fail('缺少 D1 DB binding');
-  if (/^\s*database_id\s*=\s*["'][^"']+["']/m.test(config)) fail('wrangler.toml 不应保存真实 database_id');
-  if (!/migrations_dir\s*=\s*["']\.\/migrations["']/.test(config)) fail('缺少 migrations_dir 配置');
-  if (/8390c468-3c92-4d64-95b9-10b90accb9b6/.test(config)) fail('发现旧项目硬编码的 database_id');
+  if (/^\s*database_id\s*=/m.test(config)) fail('仓库配置不应保存 database_id');
+  if (/^\s*\[\[d1_databases\]\]/m.test(config)) fail('D1 binding 应在 Cloudflare Pages Dashboard 配置，而不是仓库中保存数据库 ID');
   if (!/ST_NAV_VERSION\s*=\s*["']1\.0\.0["']/.test(config)) fail('wrangler.toml 版本号不是 1.0.0');
-  console.log('✓ Pages + D1 配置正确');
+  console.log('✓ Pages 配置不保存 D1 database_id');
 }
 
 if (existsSync('package.json')) {
   const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
   if (pkg.version !== '1.0.0') fail('package.json 版本号不是 1.0.0');
-  if (pkg.scripts?.dev !== 'wrangler pages dev public') fail('本地 dev 脚本未使用 Pages 模式');
-  if (pkg.scripts?.deploy !== 'node scripts/deploy.mjs') fail('deploy 脚本未通过自动 migration + Pages 部署脚本执行');
-  if (pkg.scripts?.['db:migrate:remote'] !== 'node scripts/migrate-remote.mjs') fail('远程 migration 脚本未使用 D1_DATABASE_ID 动态配置');
-  if (pkg.scripts?.build) fail('不应存在多余的 build 脚本');
-  if (!existsSync('scripts/deploy.mjs') || !existsSync('scripts/migrate-remote.mjs')) fail('缺少自动 D1 migration 部署脚本');
-  console.log('✓ package.json 配置正确');
+  if (pkg.scripts?.dev !== 'npm run build && wrangler pages dev public') fail('本地 dev 脚本未先生成 Worker');
+  if (pkg.scripts?.build !== 'node scripts/build.mjs') fail('build 脚本未生成运行时 migration Worker');
+  if (pkg.scripts?.deploy !== 'npm run build && wrangler pages deploy public') fail('deploy 脚本未使用标准 Pages 部署流程');
+  if (!pkg.scripts?.['db:migrate:remote']) fail('缺少可选的远程 migration CLI 脚本');
+  console.log('✓ package.json / Dashboard Build 流程配置正确');
 }
 
 if (existsSync('public/.assetsignore')) {
@@ -82,13 +75,17 @@ if (existsSync('public/_worker.js')) {
   if (!worker.includes('safePasswordMatch')) fail('管理员密码未使用固定长度摘要比较');
   if (!worker.includes('MAX_JSON_BODY_BYTES')) fail('缺少请求体大小限制');
   if (!worker.includes('new WeakMap')) fail('D1 初始化缓存未按环境隔离');
+  if (!worker.includes('RUNTIME_MIGRATIONS')) fail('Worker 未嵌入运行时 migration');
+  if (worker.includes('__RUNTIME_MIGRATIONS__')) fail('Worker 仍保留未构建的 migration 占位符');
+  if (!worker.includes('_stnav_migrations')) fail('缺少运行时 migration 版本表');
+  if (!worker.includes('await ensureDatabase(env)')) fail('缺少自动数据库初始化调用');
   if (/length\s*<\s*10/.test(worker) || /length\s*<\s*16/.test(worker)) fail('ADMIN_PASSWORD 仍存在最小长度限制');
   if (!worker.includes('if (!env.ADMIN_PASSWORD)')) fail('ADMIN_PASSWORD 空值检查缺失');
-  if (worker.includes('databaseReadyPromise')) fail('仍存在全局 D1 初始化 Promise');
-  console.log('✓ Pages Worker / 安全代码检查通过');
+  console.log('✓ Pages Worker / 自动 D1 初始化检查通过');
 }
 
 if (process.exitCode) process.exit(process.exitCode);
 
-console.log('\n✓ v1.0.0 项目结构检查完成');
-console.log('ℹ️ 生产环境请在 Cloudflare Pages Dashboard 中绑定 DB / ADMIN_PASSWORD / SESSION_SECRET，并设置 D1_DATABASE_ID 供部署脚本执行远程 migrations。');
+console.log('\n✓ 项目检查完成');
+console.log('ℹ️ Cloudflare Dashboard 只需绑定 DB、ADMIN_PASSWORD、SESSION_SECRET；不需要 D1_DATABASE_ID。');
+console.log('ℹ️ Git 集成部署时不调用 Cloudflare 控制面 API；D1 表结构/初始数据会在首次请求触发时自动初始化，后续请求自动应用新增 migration。');

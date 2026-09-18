@@ -74,13 +74,17 @@ st-nav/
 
 ## 三、第一次部署：推荐流程
 
+本项目专门适配 **Cloudflare Pages + GitHub 集成 + D1 Binding**。
+
+核心目标是：**仓库不保存 D1 `database_id`，Cloudflare Dashboard 不需要配置 `D1_DATABASE_ID`，也不需要在项目中保存 Cloudflare API Token。**
+
 ### 1. 上传 GitHub
 
 将整个项目目录上传到 GitHub，例如仓库名：`st-nav`。
 
 推荐生产分支：`main`。
 
-### 2. 创建 D1
+### 2. 创建 D1（第一次只做一次）
 
 在 Cloudflare Dashboard 创建 D1 数据库：
 
@@ -94,22 +98,188 @@ Workers & Pages → D1 → Create database
 st-nav
 ```
 
-### 3. 配置 Wrangler
+这一步只是创建 Cloudflare 的 D1 资源，**不需要手动创建表，也不需要导入 SQL。**
 
-仓库中的 `wrangler.toml` **不保存真实 `database_id`**，只保留 D1 binding 和 migrations 目录：
+### 3. Pages 绑定 D1
 
-```toml
-[[d1_databases]]
-binding = "DB"
-database_name = "st-nav"
-migrations_dir = "./migrations"
+创建 Pages 项目后进入：
+
+```text
+Pages 项目 → Settings → Bindings → Add → D1 database
 ```
 
-这是刻意设计的：Cloudflare D1 的 `database_id` 是资源标识，不需要提交到 Git。部署脚本会从 `D1_DATABASE_ID` 环境变量读取它，并临时生成 `.wrangler.deploy.toml`；部署完成后立即删除该临时文件。
+填写：
 
-### 4. 初始化数据库：自动完成
+```text
+Variable name: DB
+D1 database: st-nav
+```
 
-本项目使用标准 D1 migrations：
+**变量名必须是 `DB`。**
+
+Cloudflare Pages 的 D1 binding 负责让运行中的 Worker 访问这个数据库；仓库本身不保存真实 `database_id`。
+
+### 4. Cloudflare Dashboard 的 GitHub 构建设置
+
+第一次连接 GitHub 时填写：
+
+```text
+Project name:
+shortlink-nav
+
+Production branch:
+main
+
+Framework preset:
+None
+
+Build command:
+npm run build
+
+Build output directory:
+public
+
+Root directory:
+/
+```
+
+**不要填写 `npm run deploy`。**
+
+`npm run deploy` 是给本地 Wrangler CLI 使用的；Cloudflare Pages Git 集成已经负责最终的 Pages 部署，如果再调用 `wrangler pages deploy` 会形成重复部署。
+
+### 5. 配置生产环境变量 / Secret
+
+只需要配置应用运行时需要的变量：
+
+```text
+ADMIN_PASSWORD=你的管理员密码
+SESSION_SECRET=随机高熵字符串
+```
+
+**不需要配置：**
+
+```text
+D1_DATABASE_ID
+CLOUDFLARE_API_TOKEN
+CLOUDFLARE_ACCOUNT_ID
+```
+
+### 6. 数据库初始化是自动的
+
+这里是本项目和普通静态 Pages 项目的主要区别。
+
+Cloudflare Pages 的 GitHub Build 本身不能在没有 Cloudflare 控制面认证的情况下直接执行远程 `wrangler d1 migrations apply --remote`；D1 Wrangler 命令通过 Cloudflare API 操作控制面。为了实现你要求的“仓库零 API Token”，本项目把 migration 执行器放进 Pages Worker，通过已经绑定的 `DB` D1 Binding 完成初始化。Cloudflare D1 Worker API 支持直接执行 SQL，`batch()` 还是事务性的；`exec()` 也支持多条 SQL，但本项目使用 `batch()` 执行实际 migration。 citeturn0search1turn0search12
+
+第一次真正访问网站/API 时：
+
+```text
+访问网站
+   ↓
+Worker 获得 DB Binding
+   ↓
+创建 _stnav_migrations 版本表
+   ↓
+检查 0001 / 0002 / 0003
+   ↓
+执行尚未完成的 migration
+   ↓
+创建业务表 + 索引
+   ↓
+插入默认设置 + 默认导航数据
+   ↓
+记录 migration 已完成
+```
+
+因此你**不需要进入 D1 Console 手工初始化表或插入数据**。
+
+### 7. 后续更新也是自动的
+
+以后增加：
+
+```text
+migrations/0004_add_xxx.sql
+```
+
+提交 GitHub 后 Cloudflare 自动构建部署。
+
+新版本 Worker 启动后会检查 `_stnav_migrations`：
+
+```text
+0001 → 已完成 → 跳过
+0002 → 已完成 → 跳过
+0003 → 已完成 → 跳过
+0004 → 未完成 → 自动执行
+```
+
+因此数据库结构和初始数据会跟着代码版本增量更新。
+
+> 重要：不要修改已经在生产环境执行过的 migration。数据库结构变更请始终新增 `0004`、`0005` 等 migration。
+
+## 四、本地开发
+
+安装依赖后：
+
+```bash
+npm install
+npm run dev
+```
+
+构建 Worker 时会自动把 `migrations/*.sql` 嵌入 Pages Worker：
+
+```bash
+npm run build
+```
+
+生产环境的 D1 使用 Cloudflare Pages 的 `DB` Binding；本地 Wrangler D1 可以使用独立的本地数据库进行测试。
+
+## 五、CLI 部署（可选）
+
+如果你不使用 Cloudflare GitHub 集成，而是在自己的电脑上直接部署，可以：
+
+```bash
+npx wrangler login
+npm run deploy
+```
+
+这个命令执行标准 Pages 部署：
+
+```text
+npm run build
+      ↓
+生成 public/_worker.js
+      ↓
+wrangler pages deploy public
+```
+
+运行时仍然会通过 D1 Binding 自动初始化/升级数据库。
+
+如果你确实希望在 CLI 部署前就直接执行 Cloudflare 远程 migration，也可以使用：
+
+```bash
+D1_DATABASE_ID=你的D1数据库UUID npm run db:migrate:remote
+```
+
+但这属于**可选的、需要 Cloudflare 控制面认证的运维方式**，Cloudflare Dashboard GitHub 部署不依赖它。
+
+## 六、数据库与首次部署说明
+
+### 空数据库
+
+新建 D1 后，**不要手工执行 SQL**。
+
+只需要：
+
+```text
+创建 D1
+  ↓
+Pages 绑定 DB
+  ↓
+GitHub 部署
+  ↓
+首次请求自动初始化
+```
+
+当前 migration：
 
 ```text
 migrations/0001_initial.sql
@@ -117,179 +287,25 @@ migrations/0002_link_favorites.sql
 migrations/0003_navigation_favorites.sql
 ```
 
-执行：
-
-```bash
-npm run deploy
-```
-
-脚本会按以下顺序自动执行：
-
-```text
-读取 D1_DATABASE_ID
-        ↓
-临时生成 Wrangler D1 配置
-        ↓
-wrangler d1 migrations apply DB --remote
-        ↓
-只执行尚未应用的 migration
-        ↓
-wrangler pages deploy public
-        ↓
-删除临时配置
-```
-
-因此**第一次部署**会自动创建全部数据库表、索引、默认设置和默认导航数据；**后续部署**只会执行新增 migration。Cloudflare D1 会记录已经应用的 migration，因此不需要删除数据库，也不会重复执行已经完成的 migration。
-
-例如未来新增：
-
-```text
-migrations/0004_add_xxx.sql
-```
-
-再次运行 `npm run deploy`，只会应用 `0004_add_xxx.sql`。
-
-> 重要：不要修改已经在生产环境执行过的 migration。数据库结构变更请始终新增 `0004`、`0005` 等 migration。
-
-> `npm run deploy` 使用 Wrangler 的登录凭据，不要求项目中保存 `CLOUDFLARE_API_TOKEN`。首次在一台电脑上部署时运行 `npx wrangler login` 完成 OAuth 登录即可。
-
-### 5. 配置 Cloudflare Pages
-
-进入：
-
-```text
-Pages 项目 → Settings → Bindings → Add → D1 database
-```
-
-绑定：
-
-```text
-Variable name: DB
-D1 database: st-nav
-```
-
-**变量名必须为 `DB`。**
-
-另外，在 Production 环境变量中添加：
-
-```text
-D1_DATABASE_ID=你的 D1 database UUID
-```
-
-`D1_DATABASE_ID` 仅用于部署脚本执行远程 migration，不会被 Worker 在运行时使用。生产运行时真正连接数据库的是 Cloudflare Pages 的 `DB` D1 Binding。
-
-### 7. 设置生产环境 Secret
-
-在 Pages 项目的 Production 环境添加：
-
-```text
-ADMIN_PASSWORD=你的管理员密码
-SESSION_SECRET=随机高熵字符串
-```
-
-建议：
-- `ADMIN_PASSWORD` 使用较强密码。
-- `SESSION_SECRET` 至少 32 个字符，并与管理员密码完全分开。
-- 不要将真实 Secret 提交到 GitHub。
-
-### 8. 部署
-
-推荐使用项目提供的：
-
-```bash
-npm run deploy
-```
-
-如果使用 Cloudflare 的 Git/Build 自动部署，请确保构建环境能够运行 Wrangler，并提供 `D1_DATABASE_ID`；Cloudflare 的构建部署认证由 Cloudflare/构建环境提供，不要把 API Token 写进仓库。
-
-部署完成后：
-
-```text
-https://你的项目.pages.dev/
-https://你的项目.pages.dev/admin.html
-```
-
-## 四、以后升级数据库
-
-**不要修改已经在生产环境执行过的 migration。**
-
-如果未来需要数据库结构变化，应新增：
-
-```text
-migrations/0004_xxx.sql
-migrations/0005_xxx.sql
-```
-
-然后重新部署：
-
-```bash
-npm run deploy
-```
-
-本项目的应用版本号从历史版本调整为 `1.0.0`，**不代表数据库 migration 要重新编号**。
-
-## 五、本地开发
-
-```bash
-npm install
-cp .dev.vars.example .dev.vars
-npm run db:migrate:local
-npm run dev
-```
-
-检查项目：
-
-```bash
-npm run doctor
-```
-
-本地开发使用 Wrangler Pages 模式，D1 本地数据库也通过 migration 初始化。
-
-## 六、CLI 部署
-
-已经完成 D1 和 Secret 配置后，直接执行：
-
-```bash
-npm run deploy
-```
-
-这个命令不是单纯的 Pages 上传，而是“**D1 migration + Pages 部署**”一体化流程。它会先应用所有尚未执行的 migration，再上传 `public/`。
-
-首次使用 Wrangler 的电脑先执行一次：
-
-```bash
-npx wrangler login
-```
-
-不需要把 `CLOUDFLARE_API_TOKEN` 写入项目。
-
-## 七、数据库与首次部署说明
-
-### 空数据库
-
-新建 D1 后，不需要自己创建 `links`、`navigation`、`settings` 等表。执行：
-
-```bash
-npm run deploy
-```
-
-即可自动完成当前数据库初始化并部署应用。
+`0001` 会创建业务表、索引、默认设置和默认导航数据；`0002`、`0003` 会继续添加收藏字段。
 
 ### 已有数据库
 
-不要删除数据库，也不要重新执行 `0001_initial.sql`。
+不要删除数据库，也不要重新执行旧 migration。
 
-直接重新部署：
+直接提交新的 migration：
 
-```bash
-npm run deploy
+```text
+migrations/0004_xxx.sql
 ```
 
-Wrangler 会根据 D1 migration 历史执行待处理迁移。
+然后正常 GitHub 部署即可。
 
-### Worker 的数据库检查
+### Worker 的数据库初始化
 
-Worker 启动 API 前会检查 D1 是否绑定以及基础业务表是否存在。如果数据库未初始化，后台 API 会明确提示数据库尚未初始化，而不是静默创建不完整的数据结构。
+Worker 会在第一次需要数据库的请求中自动初始化数据库，并使用 `_stnav_migrations` 保存应用过的 migration 编号。
+
+如果数据库初始化失败，当前请求会返回错误；修复部署问题后再次请求即可继续初始化。已经成功完成的 migration 不会重复执行。
 
 ## 八、备份与恢复
 
@@ -308,10 +324,8 @@ Worker 启动 API 前会检查 D1 是否绑定以及基础业务表是否存在�
 
 检查：
 
-1. `npm run deploy` 是否成功执行 D1 migrations；
-2. Pages Binding 是否为 `DB → st-nav`；
-3. `D1_DATABASE_ID` 是否对应当前 D1；
-4. Pages 的 `DB` Binding 是否绑定到同一个 D1；
+1. Cloudflare Pages 是否成功完成 Build；
+2. Pages 的 `DB` Binding 是否绑定到正确的 D1；
 5. `ADMIN_PASSWORD` 是否存在；
 6. `SESSION_SECRET` 是否存在；
 7. 最新 Pages Deployment 是否成功。
@@ -335,13 +349,11 @@ SESSION_SECRET
 
 ### 短链接收藏或导航收藏字段不存在
 
-说明数据库 migration 没有全部执行。不要手工修改表结构，重新执行：
+说明 Worker 尚未完成运行时 migration。不要手工修改表结构。
 
-```bash
-npm run deploy
-```
+重新访问首页或 `/api/health`，Worker 会继续执行尚未完成的 migration。
 
-不要手工 ALTER 表。
+如果仍失败，请查看 Pages Functions 日志。
 
 ### CSS / JS 更新后浏览器仍显示旧界面
 
@@ -365,19 +377,20 @@ npm run deploy
 npm run doctor
 ```
 
-数据库初始化/升级 + 部署：
+构建检查：
 
 ```bash
-npm run deploy
+npm run build
 ```
+
+Cloudflare GitHub 集成部署使用 Dashboard 中的 Build command：`npm run build`。数据库初始化/升级由 Pages Worker 通过 `DB` Binding 自动完成。
 
 确认：
 
 ```text
 □ D1 数据库已创建
-□ D1_DATABASE_ID 已配置
 □ DB binding 正确
-□ migrations 自动执行
+□ 首次请求自动初始化 migrations
 □ ADMIN_PASSWORD 已设置
 □ SESSION_SECRET 已设置
 □ npm run doctor 通过
