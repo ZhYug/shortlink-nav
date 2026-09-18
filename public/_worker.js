@@ -1,5 +1,5 @@
 
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 const SESSION_COOKIE = "__Host-stnav_session";
 const SESSION_TTL = 86400;
 const PUBLIC_CACHE_CONTROL = "public, max-age=0, s-maxage=30, stale-while-revalidate=60";
@@ -20,6 +20,11 @@ const RUNTIME_MIGRATIONS = [
     "id": "0003",
     "file": "0003_navigation_favorites.sql",
     "sql": "-- Add persistent favorites for navigation entries.\nALTER TABLE navigation ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0 CHECK (favorite IN (0, 1));\nCREATE INDEX IF NOT EXISTS idx_navigation_favorite ON navigation(favorite DESC, sort_order ASC, id ASC);"
+  },
+  {
+    "id": "0004",
+    "file": "0004_database_optimization.sql",
+    "sql": "-- Database optimization: lean indexes, normalized linked navigation data,\n-- and database-maintained click totals.\n\nDROP INDEX IF EXISTS idx_links_enabled;\nDROP INDEX IF EXISTS idx_links_clicks;\nDROP INDEX IF EXISTS idx_links_favorite;\nDROP INDEX IF EXISTS idx_link_daily_stats_day;\nDROP INDEX IF EXISTS idx_navigation_favorite;\nDROP INDEX IF EXISTS idx_navigation_link_id;\n\nCREATE INDEX IF NOT EXISTS idx_links_clicks_id\n  ON links(clicks DESC, id DESC);\nCREATE INDEX IF NOT EXISTS idx_links_created_at\n  ON links(created_at DESC, id DESC);\nCREATE INDEX IF NOT EXISTS idx_link_daily_stats_day_link\n  ON link_daily_stats(day, link_id);\nCREATE INDEX IF NOT EXISTS idx_navigation_enabled_order\n  ON navigation(enabled, sort_order, id);\n\n-- Linked navigation rows no longer duplicate link title/description/url/category/enabled/favorite.\n-- Those fields remain on navigation only for standalone/manual navigation entries.\nALTER TABLE navigation RENAME TO navigation_legacy;\n\nCREATE TABLE navigation (\n  id INTEGER PRIMARY KEY,\n  title TEXT,\n  description TEXT,\n  url TEXT,\n  icon TEXT,\n  category TEXT,\n  sort_order INTEGER NOT NULL DEFAULT 0,\n  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),\n  favorite INTEGER CHECK (favorite IN (0, 1)),\n  link_id INTEGER,\n  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,\n  CHECK (link_id IS NOT NULL OR (title IS NOT NULL AND url IS NOT NULL)),\n  FOREIGN KEY (link_id) REFERENCES links(id) ON DELETE CASCADE\n);\n\nINSERT INTO navigation(\n  id,title,description,url,icon,category,sort_order,enabled,favorite,link_id,created_at,updated_at\n)\nSELECT\n  id,\n  CASE WHEN link_id IS NULL THEN title END,\n  CASE WHEN link_id IS NULL THEN description END,\n  CASE WHEN link_id IS NULL THEN url END,\n  icon,\n  CASE WHEN link_id IS NULL THEN category END,\n  sort_order,\n  enabled,\n  CASE WHEN link_id IS NULL THEN favorite END,\n  link_id,\n  created_at,\n  updated_at\nFROM navigation_legacy;\n\nDROP TABLE navigation_legacy;\n\nCREATE INDEX IF NOT EXISTS idx_navigation_enabled_order\n  ON navigation(enabled, sort_order, id);\nCREATE UNIQUE INDEX IF NOT EXISTS idx_navigation_link_unique\n  ON navigation(link_id)\n  WHERE link_id IS NOT NULL;\n\n-- Reconcile the denormalized total once before enabling live trigger maintenance.\nUPDATE links\nSET clicks = COALESCE((SELECT SUM(clicks) FROM link_daily_stats WHERE link_daily_stats.link_id = links.id), 0);\n\n-- links.clicks remains a fast denormalized total, but application code only writes\n-- link_daily_stats. These triggers keep the total atomic with the daily aggregate.\nCREATE TRIGGER IF NOT EXISTS trg_link_daily_stats_insert\nAFTER INSERT ON link_daily_stats\nBEGIN\n  UPDATE links\n  SET clicks = clicks + NEW.clicks, last_clicked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')\n  WHERE id = NEW.link_id;\nEND;\n\nCREATE TRIGGER IF NOT EXISTS trg_link_daily_stats_update\nAFTER UPDATE OF clicks ON link_daily_stats\nBEGIN\n  UPDATE links\n  SET clicks = clicks + (NEW.clicks - OLD.clicks), last_clicked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')\n  WHERE id = NEW.link_id;\nEND;\n\nCREATE TRIGGER IF NOT EXISTS trg_link_daily_stats_delete\nAFTER DELETE ON link_daily_stats\nBEGIN\n  UPDATE links\n  SET clicks = MAX(0, clicks - OLD.clicks)\n  WHERE id = OLD.link_id;\nEND;\n"
   }
 ];
 
@@ -29,6 +34,7 @@ function splitSqlStatements(sql) {
   let quote = null;
   let lineComment = false;
   let blockComment = false;
+  let triggerBody = false;
 
   for (let i = 0; i < sql.length; i++) {
     const ch = sql[i];
@@ -77,12 +83,18 @@ function splitSqlStatements(sql) {
       current += ch;
       continue;
     }
-    if (ch === ";") {
-      if (current.trim()) statements.push(current.trim());
-      current = "";
-      continue;
-    }
     current += ch;
+
+    if (!triggerBody && /\bCREATE\s+TRIGGER\b/i.test(current)) triggerBody = true;
+    if (triggerBody && /\bBEGIN\s*$/i.test(current.trim())) triggerBody = true;
+
+    if (ch === ";") {
+      const trimmed = current.trim();
+      if (triggerBody && !/\bEND\s*;$/i.test(trimmed)) continue;
+      if (trimmed) statements.push(trimmed.slice(0, -1).trim());
+      current = "";
+      triggerBody = false;
+    }
   }
 
   if (current.trim()) statements.push(current.trim());
@@ -443,9 +455,18 @@ function invalidatePublicCache(request, ctx) {
 
 async function getPublicBootstrap(env) {
   const results = await env.DB.batch([
-    env.DB.prepare(`SELECT navigation.id,navigation.title,navigation.description,navigation.url,
-                           navigation.icon,navigation.category,navigation.sort_order,navigation.enabled,
-                           navigation.link_id,links.code,links.url AS link_url
+    env.DB.prepare(`SELECT navigation.id,
+                           COALESCE(links.title, navigation.title) AS title,
+                           COALESCE(links.description, navigation.description) AS description,
+                           navigation.url,
+                           navigation.icon,
+                           COALESCE(links.category, navigation.category) AS category,
+                           navigation.sort_order,
+                           navigation.enabled,
+                           navigation.link_id,
+                           links.code,
+                           links.url AS link_url,
+                           links.favorite AS link_favorite
                     FROM navigation
                     LEFT JOIN links ON navigation.link_id=links.id
                     WHERE navigation.enabled=1 AND (navigation.link_id IS NULL OR links.enabled=1)
@@ -548,7 +569,21 @@ function validateBackup(data) {
 async function makeBackup(env) {
   const results = await env.DB.batch([
     env.DB.prepare(`SELECT id,code,url,title,description,category,enabled,favorite,clicks,last_clicked_at,created_at,updated_at FROM links ORDER BY id`),
-    env.DB.prepare(`SELECT id,title,description,url,icon,category,sort_order,enabled,favorite,link_id,created_at,updated_at FROM navigation ORDER BY sort_order,id`),
+    env.DB.prepare(`SELECT navigation.id,
+                           COALESCE(links.title, navigation.title) AS title,
+                           COALESCE(links.description, navigation.description) AS description,
+                           COALESCE(links.url, navigation.url) AS url,
+                           navigation.icon,
+                           COALESCE(links.category, navigation.category) AS category,
+                           navigation.sort_order,
+                           navigation.enabled,
+                           CASE WHEN navigation.link_id IS NOT NULL THEN links.favorite ELSE navigation.favorite END AS favorite,
+                           navigation.link_id,
+                           navigation.created_at,
+                           navigation.updated_at
+                    FROM navigation
+                    LEFT JOIN links ON navigation.link_id=links.id
+                    ORDER BY navigation.sort_order,navigation.id`),
     env.DB.prepare(`SELECT key,value FROM settings ORDER BY key`),
     env.DB.prepare(`SELECT link_id,day,clicks FROM link_daily_stats ORDER BY day,link_id`),
   ]);
@@ -666,18 +701,18 @@ async function restoreBackup(env, data, mode) {
       const sortOrder = Number.isFinite(Number(item.sort_order)) ? Number(item.sort_order) : 0;
       const enabled = boolValue(item.enabled, true);
       const favorite = boolValue(item.favorite, false);
-      if (!title || !validUrl(url)) throw new RequestError(`备份中的导航无效：${title || url}`, 400);
       const mappedLinkId = item.link_id ? linkMap.get(Number(item.link_id)) : null;
       if (item.link_id && !mappedLinkId) throw new RequestError(`导航关联的短链接不存在：${item.link_id}`, 400);
+      if (!mappedLinkId && (!title || !validUrl(url))) throw new RequestError(`备份中的导航无效：${title || url}`, 400);
 
       if (mode === "replace") {
         const id = Number(item.id);
         if (!Number.isInteger(id) || id <= 0) throw new RequestError(`备份导航 ID 无效：${title}`, 400);
-        statements.push(env.DB.prepare(`INSERT INTO navigation(id,title,description,url,icon,category,sort_order,enabled,favorite,link_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).bind(id,title,description,url,icon,category,sortOrder,enabled,favorite,mappedLinkId||null,clean(item.created_at,80)||now(),clean(item.updated_at,80)||now()));
+        statements.push(env.DB.prepare(`INSERT INTO navigation(id,title,description,url,icon,category,sort_order,enabled,favorite,link_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).bind(id,mappedLinkId ? null : title,mappedLinkId ? null : description,mappedLinkId ? null : url,icon,mappedLinkId ? null : category,sortOrder,enabled,mappedLinkId ? null : favorite,mappedLinkId||null,clean(item.created_at,80)||now(),clean(item.updated_at,80)||now()));
       } else if (mappedLinkId) {
         const existing = await env.DB.prepare("SELECT id FROM navigation WHERE link_id=? LIMIT 1").bind(mappedLinkId).first();
-        if (existing) statements.push(env.DB.prepare(`UPDATE navigation SET title=?,description=?,url=?,icon=?,category=?,sort_order=?,enabled=?,favorite=?,updated_at=? WHERE id=?`).bind(title,description,url,icon,category,sortOrder,enabled,favorite,clean(item.updated_at,80)||now(),Number(existing.id)));
-        else statements.push(env.DB.prepare(`INSERT INTO navigation(title,description,url,icon,category,sort_order,enabled,favorite,link_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).bind(title,description,url,icon,category,sortOrder,enabled,favorite,mappedLinkId,clean(item.created_at,80)||now(),clean(item.updated_at,80)||now()));
+        if (existing) statements.push(env.DB.prepare(`UPDATE navigation SET icon=?,sort_order=?,enabled=?,updated_at=? WHERE id=?`).bind(icon,sortOrder,enabled,clean(item.updated_at,80)||now(),Number(existing.id)));
+        else statements.push(env.DB.prepare(`INSERT INTO navigation(title,description,url,icon,category,sort_order,enabled,favorite,link_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).bind(null,null,null,icon,null,sortOrder,enabled,null,mappedLinkId,clean(item.created_at,80)||now(),clean(item.updated_at,80)||now()));
       } else {
         const existing = await env.DB.prepare("SELECT id FROM navigation WHERE link_id IS NULL AND title=? AND url=? LIMIT 1").bind(title,url).first();
         if (existing) statements.push(env.DB.prepare(`UPDATE navigation SET description=?,icon=?,category=?,sort_order=?,enabled=?,favorite=?,updated_at=? WHERE id=?`).bind(description,icon,category,sortOrder,enabled,favorite,clean(item.updated_at,80)||now(),Number(existing.id)));
@@ -707,6 +742,20 @@ async function restoreBackup(env, data, mode) {
     });
     if (statements.length) await env.DB.batch(statements);
     statsAffected += statements.length;
+  }
+
+  // link_daily_stats triggers maintain live totals during normal traffic. Restore files
+  // carry an authoritative links.clicks value, so re-apply it after restoring stats.
+  for (let i = 0; i < links.length; i += 50) {
+    const chunk = links.slice(i, i + 50);
+    const statements = [];
+    for (const item of chunk) {
+      const mappedId = linkMap.get(Number(item.id));
+      if (!mappedId) continue;
+      statements.push(env.DB.prepare("UPDATE links SET clicks=?,last_clicked_at=?,updated_at=? WHERE id=?")
+        .bind(Math.max(0, Number(item.clicks) || 0), clean(item.last_clicked_at, 80) || null, clean(item.updated_at, 80) || now(), mappedId));
+    }
+    if (statements.length) await env.DB.batch(statements);
   }
 
   return { links: linksAffected, navigation: navAffected, settings: settings.length, stats: statsAffected };
@@ -765,48 +814,130 @@ async function handleApi(request, env, ctx, parts) {
   if (auth) return auth;
 
   if (path === "/api/admin/bootstrap" && method === "GET") {
+    const url = new URL(request.url);
+    const clampPageSize = (value, fallback) => {
+      const n = Number(value);
+      return [5, 8, 10, 12, 20, 32, 50].includes(n) ? n : fallback;
+    };
+    const parsePage = (value) => Math.max(1, Math.min(100000, Number.isInteger(Number(value)) ? Number(value) : 1));
+    const linksPageSize = clampPageSize(url.searchParams.get("links_page_size"), 10);
+    const navPageSize = clampPageSize(url.searchParams.get("nav_page_size"), 12);
+    const linksSearch = clean(url.searchParams.get("links_search"), 100).trim();
+    const navSearch = clean(url.searchParams.get("nav_search"), 100).trim();
+    const navCategory = clean(url.searchParams.get("nav_category"), 80).trim();
+    const linksSort = new Set(["created_desc", "created_asc", "clicks_desc", "clicks_asc", "code_asc", "code_desc", "favorite_desc"]).has(url.searchParams.get("links_sort"))
+      ? url.searchParams.get("links_sort")
+      : "created_desc";
+    const requestedLinksPage = parsePage(url.searchParams.get("links_page"));
+    const requestedNavPage = parsePage(url.searchParams.get("nav_page"));
+
+    const linksWhere = linksSearch
+      ? `WHERE (code LIKE '%' || ? || '%' COLLATE NOCASE
+          OR url LIKE '%' || ? || '%' COLLATE NOCASE
+          OR COALESCE(title,'') LIKE '%' || ? || '%' COLLATE NOCASE
+          OR COALESCE(category,'') LIKE '%' || ? || '%' COLLATE NOCASE)`
+      : "";
+    const navWhere = `WHERE (navigation.link_id IS NULL OR links.id IS NOT NULL)
+      AND (? = '' OR (
+        COALESCE(links.title, navigation.title, '') LIKE '%' || ? || '%' COLLATE NOCASE
+        OR COALESCE(links.url, navigation.url, '') LIKE '%' || ? || '%' COLLATE NOCASE
+        OR COALESCE(links.description, navigation.description, '') LIKE '%' || ? || '%' COLLATE NOCASE
+        OR COALESCE(links.category, navigation.category, '') LIKE '%' || ? || '%' COLLATE NOCASE
+      ))
+      AND (? = '' OR COALESCE(links.category, navigation.category, '') = ?)`;
+    const linkOrder = {
+      created_desc: "created_at DESC, id DESC",
+      created_asc: "created_at ASC, id ASC",
+      clicks_desc: "clicks DESC, id DESC",
+      clicks_asc: "clicks ASC, id ASC",
+      code_asc: "code COLLATE NOCASE ASC, id ASC",
+      code_desc: "code COLLATE NOCASE DESC, id DESC",
+      favorite_desc: "favorite DESC, id DESC",
+    }[linksSort];
+    const linkSearchBinds = linksSearch ? [linksSearch, linksSearch, linksSearch, linksSearch] : [];
+    const navSearchBinds = [navSearch, navSearch, navSearch, navSearch, navSearch, navCategory, navCategory];
+
     const today = new Date();
     today.setUTCHours(0, 0, 0, 0);
     const startDay = new Date(today);
     startDay.setUTCDate(today.getUTCDate() - 13);
     const start = startDay.toISOString().slice(0, 10);
 
-    const results = await env.DB.batch([
+    const counts = await env.DB.batch([
       env.DB.prepare(`SELECT
         (SELECT COUNT(*) FROM links) links,
         (SELECT COALESCE(SUM(clicks),0) FROM links) clicks,
         (SELECT COUNT(*) FROM navigation) navigation,
-        (SELECT COALESCE(SUM(clicks),0) FROM link_daily_stats WHERE day>=?) recentClicks` ).bind(start),
+        (SELECT COALESCE(SUM(clicks),0) FROM link_daily_stats WHERE day>=?) recentClicks`).bind(start),
       env.DB.prepare("SELECT id,code,url,title,clicks FROM links ORDER BY clicks DESC,id DESC LIMIT 8"),
       env.DB.prepare(`SELECT day, COALESCE(SUM(clicks),0) clicks
        FROM link_daily_stats
        WHERE day>=?
        GROUP BY day
        ORDER BY day`).bind(start),
-      env.DB.prepare("SELECT id,code,url,title,description,category,enabled,clicks,last_clicked_at,created_at,updated_at,favorite FROM links ORDER BY created_at DESC,id DESC"),
+      env.DB.prepare(`SELECT COUNT(*) AS total FROM links ${linksWhere}`).bind(...linkSearchBinds),
+      env.DB.prepare(`SELECT COUNT(*) AS total FROM navigation LEFT JOIN links ON navigation.link_id=links.id ${navWhere}`).bind(...navSearchBinds),
+    ]);
+
+    const linkTotal = Number(counts[3].results[0]?.total || 0);
+    const navTotal = Number(counts[4].results[0]?.total || 0);
+    const linkPages = Math.max(1, Math.ceil(linkTotal / linksPageSize));
+    const navPages = Math.max(1, Math.ceil(navTotal / navPageSize));
+    const linkPage = Math.min(requestedLinksPage, linkPages);
+    const navPage = Math.min(requestedNavPage, navPages);
+
+    const results = await env.DB.batch([
+      env.DB.prepare(`SELECT links.id,links.code,links.url,links.title,links.description,links.category,links.enabled,links.clicks,links.last_clicked_at,links.created_at,links.updated_at,links.favorite,
+                             navigation.id AS navigation_id
+                      FROM links
+                      LEFT JOIN navigation ON navigation.link_id=links.id
+                      ${linksWhere.replaceAll("code", "links.code").replaceAll("url", "links.url").replaceAll("title", "links.title").replaceAll("category", "links.category")}
+                      ORDER BY ${linkOrder.replaceAll("created_at", "links.created_at").replaceAll("clicks", "links.clicks").replaceAll("id", "links.id").replaceAll("code", "links.code").replaceAll("favorite", "links.favorite")}
+                      LIMIT ? OFFSET ?`).bind(...linkSearchBinds, linksPageSize, (linkPage - 1) * linksPageSize),
       env.DB.prepare(`SELECT
-        navigation.id,navigation.title,navigation.description,navigation.url,navigation.icon,
-        navigation.category,navigation.sort_order,navigation.enabled,navigation.favorite,navigation.created_at,
-        navigation.updated_at,navigation.link_id,links.code,links.url AS link_url,links.title AS link_title,
-        links.description AS link_description,links.category AS link_category,
+        navigation.id,
+        CASE WHEN navigation.link_id IS NOT NULL THEN COALESCE(links.title, links.code) ELSE navigation.title END AS title,
+        CASE WHEN navigation.link_id IS NOT NULL THEN links.description ELSE navigation.description END AS description,
+        CASE WHEN navigation.link_id IS NOT NULL THEN NULL ELSE navigation.url END AS url,
+        navigation.icon,
+        CASE WHEN navigation.link_id IS NOT NULL THEN links.category ELSE navigation.category END AS category,
+        navigation.sort_order,
+        navigation.enabled,
+        CASE WHEN navigation.link_id IS NOT NULL THEN links.favorite ELSE navigation.favorite END AS favorite,
+        navigation.created_at,
+        navigation.updated_at,
+        navigation.link_id,
+        links.code,
+        links.url AS link_url,
+        links.title AS link_title,
+        links.description AS link_description,
+        links.category AS link_category,
         links.enabled AS link_enabled
        FROM navigation
        LEFT JOIN links ON navigation.link_id = links.id
-       ORDER BY navigation.sort_order,navigation.id`),
+       ${navWhere}
+       ORDER BY navigation.sort_order,navigation.id
+       LIMIT ? OFFSET ?`).bind(...navSearchBinds, navPageSize, (navPage - 1) * navPageSize),
+      env.DB.prepare(`SELECT DISTINCT COALESCE(links.category, navigation.category) AS category
+                      FROM navigation
+                      LEFT JOIN links ON navigation.link_id=links.id
+                      WHERE navigation.link_id IS NULL OR links.id IS NOT NULL`),
+      env.DB.prepare("SELECT id FROM navigation ORDER BY sort_order,id"),
       env.DB.prepare("SELECT key,value FROM settings"),
     ]);
 
     const origin = new URL(request.url).origin;
-    const links = results[3].results.map((item) => ({
+    const links = results[0].results.map((item) => ({
       ...item,
       short_url: item.code ? `${origin}/${item.code}` : "",
     }));
-    const nav = results[4].results.map((item) => ({
+    const nav = results[1].results.map((item) => ({
       ...item,
       short_url: item.code ? `${origin}/${item.code}` : "",
       url: item.code ? `${origin}/${item.code}` : item.url,
+      favorite: item.favorite === null ? 0 : item.favorite,
     }));
-    const trendMap = new Map(results[2].results.map((row) => [row.day, Number(row.clicks) || 0]));
+    const trendMap = new Map(counts[2].results.map((row) => [row.day, Number(row.clicks) || 0]));
     const trend = [];
     for (let offset = 13; offset >= 0; offset--) {
       const day = new Date(today);
@@ -816,10 +947,14 @@ async function handleApi(request, env, ctx, parts) {
     }
 
     return json({
-      dashboard: { stats: results[0].results[0], topLinks: results[1].results, trend },
+      dashboard: { stats: counts[0].results[0], topLinks: counts[1].results, trend },
       links,
+      links_pagination: { page: linkPage, page_size: linksPageSize, total: linkTotal, pages: linkPages },
       navigation: nav,
-      settings: Object.fromEntries(results[5].results.map((x) => [x.key, x.value])),
+      navigation_pagination: { page: navPage, page_size: navPageSize, total: navTotal, pages: navPages },
+      navigation_categories: results[2].results.map((row) => row.category).filter(Boolean).sort((a, b) => String(a).localeCompare(String(b), "zh-CN")),
+      navigation_order: results[3].results.map((row) => Number(row.id)),
+      settings: Object.fromEntries(results[4].results.map((x) => [x.key, x.value])),
     });
   }
 
@@ -859,7 +994,7 @@ async function handleApi(request, env, ctx, parts) {
           if (mode === "skip") { skipped++; continue; }
           if (mode === "update") {
             await env.DB.prepare(`UPDATE links SET url=?,title=?,description=?,category=?,enabled=?,favorite=?,updated_at=? WHERE id=?`).bind(url,title,description,category,enabled,favorite,now(),Number(existing.id)).run();
-            await env.DB.prepare(`UPDATE navigation SET title=?,description=?,category=?,icon=?,enabled=?,updated_at=? WHERE link_id=?`).bind(title,description,category,faviconUrl(url),enabled,now(),Number(existing.id)).run();
+            await env.DB.prepare(`UPDATE navigation SET icon=?,enabled=?,updated_at=? WHERE link_id=?`).bind(faviconUrl(url),enabled,now(),Number(existing.id)).run();
             imported++; continue;
           }
           if (mode === "rename") code = "";
@@ -935,7 +1070,6 @@ async function handleApi(request, env, ctx, parts) {
       let affected = 0;
       for (const chunk of chunks(ids, 90)) {
         const marks = placeholders(chunk.length);
-        const origin = new URL(request.url).origin;
         // Fetch selected links once, then insert them in bounded D1 batches.
         const selected = await env.DB.prepare(
           `SELECT id,code,title,description,url,category,enabled,favorite
@@ -958,18 +1092,13 @@ async function handleApi(request, env, ctx, parts) {
           const statements = pendingBatch.map((link, index) =>
             env.DB.prepare(
               `INSERT INTO navigation
-               (link_id,title,description,url,icon,category,sort_order,enabled,favorite,updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?)`
+               (link_id,icon,sort_order,enabled,updated_at)
+               VALUES(?,?,?,?,?)`
             ).bind(
               Number(link.id),
-              clean(link.title, 120) || clean(link.code, 120),
-              clean(link.description, 500),
-              `${origin}/${link.code}`,
               faviconUrl(link.url),
-              clean(link.category, 80),
               baseOrder + index + 1,
               Number(link.enabled) ? 1 : 0,
-              Number(link.favorite) ? 1 : 0,
               now()
             )
           );
@@ -1016,6 +1145,34 @@ async function handleApi(request, env, ctx, parts) {
       for (const code of deletedCodes) invalidateRedirectCache(request, ctx, code);
     }
     return json({ ok: true, affected, failed: ids.length - affected });
+  }
+
+  if (path === "/api/admin/links/ids" && method === "GET") {
+    const url = new URL(request.url);
+    const search = clean(url.searchParams.get("search"), 100).trim();
+    const sort = new Set(["created_desc", "created_asc", "clicks_desc", "clicks_asc", "code_asc", "code_desc", "favorite_desc"]).has(url.searchParams.get("sort"))
+      ? url.searchParams.get("sort")
+      : "created_desc";
+    const where = search
+      ? `WHERE (code LIKE '%' || ? || '%' COLLATE NOCASE
+          OR url LIKE '%' || ? || '%' COLLATE NOCASE
+          OR COALESCE(title,'') LIKE '%' || ? || '%' COLLATE NOCASE
+          OR COALESCE(category,'') LIKE '%' || ? || '%' COLLATE NOCASE)`
+      : "";
+    const order = {
+      created_desc: "created_at DESC, id DESC",
+      created_asc: "created_at ASC, id ASC",
+      clicks_desc: "clicks DESC, id DESC",
+      clicks_asc: "clicks ASC, id ASC",
+      code_asc: "code COLLATE NOCASE ASC, id ASC",
+      code_desc: "code COLLATE NOCASE DESC, id DESC",
+      favorite_desc: "favorite DESC, id DESC",
+    }[sort];
+    const binds = search ? [search, search, search, search] : [];
+    const result = await env.DB.prepare(`SELECT id FROM links ${where} ORDER BY ${order} LIMIT 2000`).bind(...binds).all();
+    const count = result.results.length;
+    if (count >= 2000) return json({ error: "当前筛选结果超过 2000 项，请缩小筛选范围后再选择全部" }, 413);
+    return json({ ids: result.results.map((row) => Number(row.id)), total: count });
   }
 
   if (path === "/api/admin/links/check-code" && method === "GET") {
@@ -1089,11 +1246,8 @@ if (path === "/api/admin/links" && method === "POST") {
     const data = await body(request);
     const favorite = boolValue(data.favorite, false);
     const timestamp = now();
-    const results = await env.DB.batch([
-      env.DB.prepare("UPDATE links SET favorite=?,updated_at=? WHERE id=?").bind(favorite, timestamp, id),
-      env.DB.prepare("UPDATE navigation SET favorite=?,updated_at=? WHERE link_id=?").bind(favorite, timestamp, id),
-    ]);
-    if (!results[0]?.meta?.changes) return json({ error: "短链接不存在" }, 404);
+    const result = await env.DB.prepare("UPDATE links SET favorite=?,updated_at=? WHERE id=?").bind(favorite, timestamp, id).run();
+    if (!result.meta?.changes) return json({ error: "短链接不存在" }, 404);
     return json({ ok: true, favorite });
   }
 
@@ -1150,12 +1304,9 @@ if (path === "/api/admin/links" && method === "POST") {
           ),
           env.DB.prepare(
             `UPDATE navigation
-             SET title=?,description=?,category=?,icon=?,enabled=?,updated_at=?
+             SET icon=?,enabled=?,updated_at=?
              WHERE link_id=?`
           ).bind(
-            clean(data.title, 200),
-            clean(data.description, 500),
-            clean(data.category, 80),
             faviconUrl(url),
             data.enabled === false ? 0 : 1,
             timestamp,
@@ -1213,26 +1364,17 @@ if (path === "/api/admin/links" && method === "POST") {
         return json({ error: "这个短链接已经在导航里了" }, 409);
       }
 
-      const requestUrl = new URL(request.url);
-      const shortUrl = requestUrl.origin + "/" + link.code;
-
       const icon = faviconUrl(link.url);
 
       await env.DB.prepare(
-        `INSERT INTO navigation
-         (link_id,title,description,url,icon,category,sort_order,enabled,favorite,updated_at)
-         VALUES(?,?,?,?,?,?,?,?,?,?)`
+        `INSERT INTO navigation(link_id,icon,sort_order,enabled,updated_at)
+         VALUES(?,?,?,?,?)`
       )
         .bind(
           linkId,
-          clean(link.title, 120),
-          clean(link.description, 500),
-          shortUrl,
           icon,
-          clean(link.category, 80),
           Number(maxResult.results[0]?.m ?? -1) + 1,
           data.enabled === false || link.enabled === 0 ? 0 : 1,
-          Number(link.favorite) ? 1 : 0,
           now()
         )
         .run();
@@ -1270,6 +1412,27 @@ if (path === "/api/admin/links" && method === "POST") {
     return json({ ok: true });
   }
 
+  if (path === "/api/admin/navigation/bulk" && method === "POST") {
+    const data = await body(request);
+    const action = String(data.action || "");
+    if (!["enable", "disable", "delete"].includes(action)) return json({ error: "批量操作类型无效" }, 400);
+    if (!Array.isArray(data.ids) || !data.ids.length) return json({ error: "请至少选择一个导航项目" }, 400);
+    const ids = [...new Set(data.ids.map(Number))];
+    if (ids.some((id) => !Number.isInteger(id) || id <= 0)) return json({ error: "导航 ID 无效" }, 400);
+    if (ids.length > 2000) return json({ error: "单次最多处理 2000 个导航项目，请分批操作" }, 400);
+    const placeholders = ids.map(() => "?").join(",");
+    const timestamp = now();
+    let result;
+    if (action === "delete") {
+      result = await env.DB.prepare(`DELETE FROM navigation WHERE id IN (${placeholders})`).bind(...ids).run();
+    } else {
+      const enabled = action === "enable" ? 1 : 0;
+      result = await env.DB.prepare(`UPDATE navigation SET enabled=?,updated_at=? WHERE id IN (${placeholders})`).bind(enabled, timestamp, ...ids).run();
+    }
+    invalidatePublicCache(request, ctx);
+    return json({ ok: true, affected: Number(result.meta?.changes || 0), failed: Math.max(0, ids.length - Number(result.meta?.changes || 0)) });
+  }
+
   if (path === "/api/admin/navigation/reorder" && method === "POST") {
     const data = await body(request);
     if (!Array.isArray(data.ids) || data.ids.some((id) => !Number.isInteger(Number(id)))) {
@@ -1302,13 +1465,11 @@ if (path === "/api/admin/links" && method === "POST") {
     const current = await env.DB.prepare("SELECT id,link_id FROM navigation WHERE id=?").bind(id).first();
     if (!current) return json({ error: "导航不存在" }, 404);
     const timestamp = now();
-    const statements = [
-      env.DB.prepare("UPDATE navigation SET favorite=?,updated_at=? WHERE id=?").bind(favorite, timestamp, id),
-    ];
     if (current.link_id) {
-      statements.push(env.DB.prepare("UPDATE links SET favorite=?,updated_at=? WHERE id=?").bind(favorite, timestamp, Number(current.link_id)));
+      await env.DB.prepare("UPDATE links SET favorite=?,updated_at=? WHERE id=?").bind(favorite, timestamp, Number(current.link_id)).run();
+    } else {
+      await env.DB.prepare("UPDATE navigation SET favorite=?,updated_at=? WHERE id=?").bind(favorite, timestamp, id).run();
     }
-    await env.DB.batch(statements);
     return json({ ok: true, favorite });
   }
 
@@ -1433,11 +1594,9 @@ async function handleRedirect(request, env, ctx, code) {
 
   const timestamp = now();
   const day = timestamp.slice(0, 10);
-  waitUntil(ctx, env.DB.batch([
-    env.DB.prepare("UPDATE links SET clicks=clicks+1,last_clicked_at=? WHERE id=?").bind(timestamp, link.id),
-    env.DB.prepare(`INSERT INTO link_daily_stats(link_id,day,clicks) VALUES(?,?,1)
-      ON CONFLICT(link_id,day) DO UPDATE SET clicks=link_daily_stats.clicks+1`).bind(link.id, day),
-  ]).catch((error) => console.error("Click analytics write failed", error)));
+  waitUntil(ctx, env.DB.prepare(`INSERT INTO link_daily_stats(link_id,day,clicks) VALUES(?,?,1)
+    ON CONFLICT(link_id,day) DO UPDATE SET clicks=link_daily_stats.clicks+1`).bind(link.id, day)
+    .run().catch((error) => console.error("Click analytics write failed", error)));
   return Response.redirect(link.url, 302);
 }
 

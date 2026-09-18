@@ -1,6 +1,10 @@
 const A = {
   links: [], nav: [], settings: {}, navSelected: new Set(), navDirty: false,
-  linkPage: 1, navPage: 1, linkSelected: new Set(), linkSort: localStorage.getItem("stnav_link_sort") || "created_desc", linkPageSize: Number(localStorage.getItem("stnav_link_page_size")) || 10, navPageSize: Number(localStorage.getItem("stnav_nav_page_size")) || 12,
+  linkPage: 1, navPage: 1, linkTotal: 0, navTotal: 0, linkPages: 1, navPages: 1,
+  navCategories: [], navOrderIds: [], linkSelected: new Set(), loadSeq: 0,
+  linkSort: localStorage.getItem("stnav_link_sort") || "created_desc",
+  linkPageSize: Number(localStorage.getItem("stnav_link_page_size")) || 10,
+  navPageSize: Number(localStorage.getItem("stnav_nav_page_size")) || 12,
 };
 
 function toast(message) {
@@ -75,17 +79,39 @@ function switchSection(section) {
   $("#sectionTitle").textContent = map[section][1];
 }
 
-async function loadAll() {
+async function loadAll({ resetPages = false } = {}) {
   try {
-    const data = await api("/api/admin/bootstrap");
+    if (resetPages) {
+      A.linkPage = 1;
+      A.navPage = 1;
+    }
+    const params = new URLSearchParams({
+      links_page: String(A.linkPage),
+      links_page_size: String(A.linkPageSize),
+      links_sort: A.linkSort || "created_desc",
+      links_search: String($("#linkSearch")?.value || "").trim(),
+      nav_page: String(A.navPage),
+      nav_page_size: String(A.navPageSize),
+      nav_search: String($("#navSearch")?.value || "").trim(),
+      nav_category: String($("#navCategoryFilter")?.value || ""),
+    });
+    const loadSeq = ++A.loadSeq;
+    const data = await api(`/api/admin/bootstrap?${params.toString()}`);
+    if (loadSeq !== A.loadSeq) return;
     A.links = data.links || [];
     A.nav = data.navigation || [];
     A.settings = data.settings || {};
-    A.navSelected = new Set();
-    A.linkSelected = new Set();
+    A.linkTotal = Number(data.links_pagination?.total || 0);
+    A.navTotal = Number(data.navigation_pagination?.total || 0);
+    A.linkPages = Number(data.links_pagination?.pages || 1);
+    A.navPages = Number(data.navigation_pagination?.pages || 1);
+    A.linkPage = Number(data.links_pagination?.page || 1);
+    A.navPage = Number(data.navigation_pagination?.page || 1);
+    A.navCategories = data.navigation_categories || [];
+    A.navOrderIds = (data.navigation_order || []).map(Number);
+    A.navSelected = new Set([...A.navSelected].filter((id) => A.navOrderIds.includes(Number(id))));
+    A.linkSelected = new Set([...A.linkSelected].filter((id) => Number.isInteger(Number(id)) && Number(id) > 0));
     A.navDirty = false;
-    A.linkPage = 1;
-    A.navPage = 1;
     renderDashboard(data.dashboard || {});
     renderLinks();
     renderNav();
@@ -166,7 +192,8 @@ function drawChart(rows) {
 }
 
 function linkedNav(item) {
-  return A.nav.find((nav) => Number(nav.link_id) === Number(item.id));
+  if (item?.navigation_id) return { id: Number(item.navigation_id) };
+  return A.nav.find((nav) => Number(nav.link_id) === Number(item?.id));
 }
 
 function renderPagination(container, page, total, pageSize, onChange) {
@@ -184,7 +211,7 @@ function renderPagination(container, page, total, pageSize, onChange) {
     <span class="pagination-info">共 ${total} 项，第 ${current}/${pages} 页</span>
     <div class="pagination-actions">
       <label class="page-size-label">每页 <select class="page-size-select">
-        ${[5,10,20,50].map((size) => `<option value="${size}" ${size === pageSize ? "selected" : ""}>${size}</option>`).join("")}
+        ${[5,8,10,12,20,32,50].map((size) => `<option value="${size}" ${size === pageSize ? "selected" : ""}>${size}</option>`).join("")}
       </select> 项</label>
       <button class="page-btn" data-page="${current - 1}" ${current <= 1 ? "disabled" : ""}>上一页</button>
       ${pageButtons.join("")}
@@ -207,37 +234,11 @@ function renderPagination(container, page, total, pageSize, onChange) {
 }
 
 function getFilteredLinks() {
-  const query = ($("#linkSearch")?.value || "").trim().toLowerCase();
-  const rows = A.links.filter((item) =>
-    [item.code, item.url, item.title, item.category]
-      .join(" ").toLowerCase().includes(query)
-  );
-
-  const sort = A.linkSort || "created_desc";
-  const compareText = (a, b) => String(a ?? "").localeCompare(String(b ?? ""), "zh-CN", { numeric: true, sensitivity: "base" });
-  const compareNumber = (a, b) => (Number(a) || 0) - (Number(b) || 0);
-  rows.sort((a, b) => {
-    let result = 0;
-    switch (sort) {
-      case "created_asc": result = compareText(a.created_at, b.created_at); break;
-      case "clicks_desc": result = compareNumber(b.clicks, a.clicks); break;
-      case "clicks_asc": result = compareNumber(a.clicks, b.clicks); break;
-      case "code_asc": result = compareText(a.code, b.code); break;
-      case "code_desc": result = compareText(b.code, a.code); break;
-      case "favorite_desc": result = compareNumber(b.favorite, a.favorite); break;
-      case "created_desc":
-      default: result = compareText(b.created_at, a.created_at); break;
-    }
-    return result || compareNumber(Number(b.id), Number(a.id));
-  });
-  return rows;
+  return A.links;
 }
 
 function syncLinkSelection() {
-  const selected = [...A.linkSelected].filter((id) =>
-    A.links.some((item) => Number(item.id) === Number(id))
-  );
-  A.linkSelected = new Set(selected.map(Number));
+  A.linkSelected = new Set([...A.linkSelected].map(Number).filter((id) => Number.isInteger(id) && id > 0));
 }
 
 function updateLinkBulkUi() {
@@ -251,15 +252,26 @@ function updateLinkBulkUi() {
   });
 }
 
-function selectVisibleLinks(all = false) {
-  const rows = getFilteredLinks();
-  const pages = Math.max(1, Math.ceil(rows.length / A.linkPageSize));
-  A.linkPage = Math.min(Math.max(1, A.linkPage), pages);
-  const offset = (A.linkPage - 1) * A.linkPageSize;
-  const targets = all ? rows : rows.slice(offset, offset + A.linkPageSize);
-  targets.forEach((item) => A.linkSelected.add(Number(item.id)));
-  renderLinks();
-  toast(all ? `已选择 ${targets.length} 项（当前筛选结果）` : `已选择本页 ${targets.length} 项`);
+async function selectVisibleLinks(all = false) {
+  if (!all) {
+    A.links.forEach((item) => A.linkSelected.add(Number(item.id)));
+    renderLinks();
+    toast(`已选择本页 ${A.links.length} 项`);
+    return;
+  }
+  try {
+    const params = new URLSearchParams({
+      search: String($("#linkSearch")?.value || "").trim(),
+      sort: A.linkSort || "created_desc",
+    });
+    const result = await api(`/api/admin/links/ids?${params.toString()}`);
+    const ids = (result.ids || []).map(Number);
+    ids.forEach((id) => A.linkSelected.add(id));
+    renderLinks();
+    toast(`已选择 ${ids.length} 项（当前筛选结果）`);
+  } catch (error) {
+    toast(`选择全部失败：${error.message}`);
+  }
 }
 
 function clearSelectedLinks() {
@@ -364,11 +376,7 @@ async function bulkLinkAction(action) {
 }
 
 function renderLinks() {
-  const rows = getFilteredLinks();
-  const pages = Math.max(1, Math.ceil(rows.length / A.linkPageSize));
-  A.linkPage = Math.min(Math.max(1, A.linkPage), pages);
-  const offset = (A.linkPage - 1) * A.linkPageSize;
-  const pageRows = rows.slice(offset, offset + A.linkPageSize);
+  const pageRows = A.links;
   const selectedIds = new Set(A.linkSelected);
 
   $("#linksTable").innerHTML = pageRows.map((item) => {
@@ -418,23 +426,26 @@ function renderLinks() {
       </div>`;
   }).join("") || '<div class="mobile-link-empty">暂无短链接</div>';
 
-  renderPagination("#linksPagination", A.linkPage, rows.length, A.linkPageSize, (page, pageSize) => {
+  renderPagination("#linksPagination", A.linkPage, A.linkTotal, A.linkPageSize, async (page, pageSize) => {
     A.linkPage = page;
     if (pageSize) { A.linkPageSize = pageSize; localStorage.setItem("stnav_link_page_size", String(pageSize)); }
-    renderLinks();
-  });
+    await loadAll();
+  }, A.linkPages);
   updateLinkBulkUi();
 }
 
-$("#linkSearch").oninput = () => { A.linkPage = 1; renderLinks(); };
+let linkSearchTimer = null;
+$("#linkSearch").oninput = () => {
+  clearTimeout(linkSearchTimer);
+  linkSearchTimer = setTimeout(() => loadAll({ resetPages: true }), 220);
+};
 const linkSort = $("#linkSort");
 if (linkSort) {
   linkSort.value = A.linkSort;
   linkSort.onchange = () => {
     A.linkSort = linkSort.value || "created_desc";
     localStorage.setItem("stnav_link_sort", A.linkSort);
-    A.linkPage = 1;
-    renderLinks();
+    loadAll({ resetPages: true });
   };
 }
 $("#selectPageLinks").onclick = () => selectVisibleLinks(false);
@@ -598,19 +609,14 @@ $("#addNavBtn").onclick = () => navModal();
 function navIcon(item) { return item.icon || iconUrl(item.url); }
 
 function navFilteredItems() {
-  const query = String($("#navSearch")?.value || "").trim().toLowerCase();
-  const category = String($("#navCategoryFilter")?.value || "");
-  return A.nav.filter((item) => {
-    const haystack = [item.title, item.url, item.description, item.category].join(" ").toLowerCase();
-    return (!query || haystack.includes(query)) && (!category || (item.category || "未分类") === category);
-  });
+  return A.nav;
 }
 
 function refreshNavFilters() {
   const select = $("#navCategoryFilter");
   if (!select) return;
   const current = select.value;
-  const categories = [...new Set(A.nav.map((item) => item.category || "未分类"))].sort((a, b) => a.localeCompare(b, "zh-CN"));
+  const categories = A.navCategories;
   select.innerHTML = '<option value="">全部分类</option>' + categories.map((category) => `<option value="${esc(category)}">${esc(category)}</option>`).join("");
   select.value = categories.includes(current) ? current : "";
 }
@@ -618,16 +624,15 @@ function refreshNavFilters() {
 function renderNav() {
   refreshNavFilters();
   const element = $("#navAdminGrid");
-  const items = navFilteredItems();
-  const pages = Math.max(1, Math.ceil(items.length / A.navPageSize));
-  A.navPage = Math.min(Math.max(1, A.navPage), pages);
-  const pageItems = items.slice((A.navPage - 1) * A.navPageSize, A.navPage * A.navPageSize);
-  const filtered = items.length !== A.nav.length;
-  $("#navCount").innerHTML = (filtered ? `${items.length} / ${A.nav.length} 项` : `${A.nav.length} 项`) + (A.navDirty ? '<span class="nav-dirty">未保存</span>' : '');
+  const pageItems = A.nav;
+  const filtered = String($("#navSearch")?.value || "").trim() || String($("#navCategoryFilter")?.value || "");
+  $("#navCount").innerHTML = `${A.navTotal} 项` + (A.navDirty ? '<span class="nav-dirty">未保存</span>' : '');
   const selectedCount = $("#navSelectedCount");
   if (selectedCount) selectedCount.textContent = `已选 ${A.navSelected.size} 项`;
   $("#navFilterHint").classList.toggle("hidden", !filtered);
-  element.innerHTML = pageItems.map((item) => `
+  element.innerHTML = pageItems.map((item) => {
+    const orderIndex = A.navOrderIds.indexOf(Number(item.id));
+    return `
     <div class="admin-nav-card ${A.navSelected.has(Number(item.id)) ? "selected" : ""}" draggable="${filtered ? "false" : "true"}" data-id="${item.id}">
       <div class="admin-nav-head">
         <div class="admin-nav-selection"><input type="checkbox" data-navact="select" data-id="${item.id}" ${A.navSelected.has(Number(item.id)) ? "checked" : ""} aria-label="选择 ${esc(item.title)}"><div class="admin-icon-wrap">
@@ -638,7 +643,7 @@ function renderNav() {
       </div>
       <p>${esc(item.description || item.url)}</p>
       <div class="nav-admin-meta">
-        <div class="nav-admin-badges">${item.link_id ? '<span class="linked-badge">短链接</span>' : '<span class="manual-badge">手动</span>'}<span class="nav-order-badge">#${Number(item.sort_order ?? 0) + 1}</span></div>
+        <div class="nav-admin-badges">${item.link_id ? '<span class="linked-badge">短链接</span>' : '<span class="manual-badge">手动</span>'}<span class="nav-order-badge">#${orderIndex >= 0 ? orderIndex + 1 : Number(item.sort_order ?? 0) + 1}</span></div>
         <span class="nav-url" title="${esc(item.url)}">${esc(item.url)}</span>
       </div>
       <div class="row-actions nav-admin-actions">
@@ -650,19 +655,19 @@ function renderNav() {
         <button class="small-btn favorite-btn ${item.favorite ? "is-favorite" : ""}" data-navact="favorite" data-id="${item.id}" aria-label="${item.favorite ? "取消收藏" : "收藏"}" title="${item.favorite ? "取消收藏" : "收藏"}">${item.favorite ? "★" : "☆"}</button>
         <button class="status status-toggle nav-status-toggle ${item.enabled ? "on" : "off"}" data-navact="status" data-id="${item.id}" aria-label="${item.enabled ? "点击停用" : "点击启用"}" title="${item.enabled ? "点击停用" : "点击启用"}">${item.enabled ? "启用" : "停用"}</button>
       </div>
-    </div>
-  `).join("") || '<div class="panel" style="padding:30px">暂无导航</div>';
-  renderPagination("#navPagination", A.navPage, items.length, A.navPageSize, (page, pageSize) => {
+    </div>`;
+  }).join("") || '<div class="panel" style="padding:30px">暂无导航</div>';
+  renderPagination("#navPagination", A.navPage, A.navTotal, A.navPageSize, async (page, pageSize) => {
     A.navPage = page;
     if (pageSize) { A.navPageSize = pageSize; localStorage.setItem("stnav_nav_page_size", String(pageSize)); }
-    renderNav();
-  });
+    await loadAll();
+  }, A.navPages);
   bindDrag();
 }
 
 function bindDrag() {
   const isFiltered = !!($("#navSearch")?.value || $("#navCategoryFilter")?.value);
-  if (isFiltered) return;
+  if (isFiltered || A.navPage !== 1) return;
   let dragging = null;
   document.querySelectorAll(".admin-nav-card").forEach((card) => {
     card.ondragstart = (event) => {
@@ -671,10 +676,7 @@ function bindDrag() {
       event.dataTransfer.effectAllowed = "move";
       event.dataTransfer.setData("text/plain", card.dataset.id);
     };
-    card.ondragend = () => {
-      card.classList.remove("dragging");
-      dragging = null;
-    };
+    card.ondragend = () => { card.classList.remove("dragging"); dragging = null; };
     card.ondragover = (event) => {
       event.preventDefault();
       if (!dragging || dragging === card) return;
@@ -685,18 +687,16 @@ function bindDrag() {
       event.preventDefault();
       if (!dragging) return;
       const visibleIds = [...document.querySelectorAll(".admin-nav-card")].map((node) => Number(node.dataset.id));
-      const visibleSet = new Set(visibleIds);
-      const positions = A.nav.map((item, index) => visibleSet.has(Number(item.id)) ? index : -1).filter((index) => index >= 0);
-      const reordered = visibleIds.map((id) => A.nav.find((item) => Number(item.id) === id)).filter(Boolean);
-      positions.forEach((position, index) => { A.nav[position] = reordered[index]; });
-      A.nav.forEach((value, index) => { value.sort_order = index; });
+      const positions = visibleIds.map((id) => A.navOrderIds.indexOf(id)).filter((index) => index >= 0);
+      const reordered = visibleIds;
+      positions.forEach((position, index) => { A.navOrderIds[position] = reordered[index]; });
+      A.navOrderIds.forEach((_, index) => {});
       A.navDirty = true;
       renderNav();
       toast("顺序已调整，点击“保存排序”后生效");
     };
   });
 }
-
 
 function navOpenUrl(item) {
   return item.link_id && item.code
@@ -766,11 +766,10 @@ $("#navAdminGrid").onclick = async (event) => {
   if (button.dataset.navact === "favorite") toggleNavFavorite(item);
   if (button.dataset.navact === "status") toggleNavEnabled(item);
   if (button.dataset.navact === "up" || button.dataset.navact === "down") {
-    const currentIndex = A.nav.findIndex((value) => Number(value.id) === Number(item.id));
+    const currentIndex = A.navOrderIds.indexOf(Number(item.id));
     const targetIndex = currentIndex + (button.dataset.navact === "up" ? -1 : 1);
-    if (currentIndex >= 0 && targetIndex >= 0 && targetIndex < A.nav.length) {
-      [A.nav[currentIndex], A.nav[targetIndex]] = [A.nav[targetIndex], A.nav[currentIndex]];
-      A.nav.forEach((value, index) => { value.sort_order = index; });
+    if (currentIndex >= 0 && targetIndex >= 0 && targetIndex < A.navOrderIds.length) {
+      [A.navOrderIds[currentIndex], A.navOrderIds[targetIndex]] = [A.navOrderIds[targetIndex], A.navOrderIds[currentIndex]];
       A.navDirty = true;
       renderNav();
       toast("顺序已调整，点击“保存排序”后生效");
@@ -778,42 +777,43 @@ $("#navAdminGrid").onclick = async (event) => {
   }
 };
 
-$("#navSearch").oninput = () => { A.navPage = 1; renderNav(); };
-$("#navCategoryFilter").onchange = () => { A.navPage = 1; renderNav(); };
+let navSearchTimer = null;
+$("#navSearch").oninput = () => {
+  clearTimeout(navSearchTimer);
+  navSearchTimer = setTimeout(() => loadAll({ resetPages: true }), 220);
+};
+$("#navCategoryFilter").onchange = () => loadAll({ resetPages: true });
 $("#clearNavFilter").onclick = () => {
   $("#navSearch").value = "";
   $("#navCategoryFilter").value = "";
-  renderNav();
+  loadAll({ resetPages: true });
 };
 
 $("#saveNavOrder").onclick = async () => {
-  const ids = A.nav.map((item) => Number(item.id));
+  const ids = A.navOrderIds.map(Number);
   try { await api("/api/admin/navigation/reorder", { method: "POST", body: JSON.stringify({ ids }) }); A.navDirty = false; toast("排序已保存"); await loadAll(); }
   catch (error) { toast(error.message); }
 };
 
 async function updateSelectedNav(enabled) {
-  const selected = A.nav.filter((item) => A.navSelected.has(Number(item.id)));
-  if (!selected.length) return toast("请先选择导航项目");
+  const ids = [...A.navSelected].map(Number);
+  if (!ids.length) return toast("请先选择导航项目");
   try {
-    await Promise.all(selected.map((item) => api(`/api/admin/navigation/${item.id}/status`, {
-      method: "PATCH",
-      body: JSON.stringify({ enabled }),
-    })));
-    toast(enabled ? `已启用 ${selected.length} 项` : `已停用 ${selected.length} 项`);
+    const result = await api("/api/admin/navigation/bulk", {
+      method: "POST",
+      body: JSON.stringify({ ids, action: enabled ? "enable" : "disable" }),
+    });
+    A.navSelected.clear();
+    toast(`${enabled ? "启用" : "停用"}完成：${Number(result.affected || 0)} 项`);
     await loadAll();
   } catch (error) { toast(error.message); }
 }
 
 function selectVisibleNav(all = false) {
-  const rows = navFilteredItems();
-  const pages = Math.max(1, Math.ceil(rows.length / A.navPageSize));
-  A.navPage = Math.min(Math.max(1, A.navPage), pages);
-  const offset = (A.navPage - 1) * A.navPageSize;
-  const targets = all ? rows : rows.slice(offset, offset + A.navPageSize);
-  targets.forEach((item) => A.navSelected.add(Number(item.id)));
+  const targets = all ? A.navOrderIds : A.nav.map((item) => Number(item.id));
+  targets.forEach((id) => A.navSelected.add(Number(id)));
   renderNav();
-  toast(all ? `已选择 ${targets.length} 项（当前筛选结果）` : `已选择本页 ${targets.length} 项`);
+  toast(all ? `已选择 ${targets.length} 项（全部导航）` : `已选择本页 ${targets.length} 项`);
 }
 
 $("#selectPageNav").onclick = () => selectVisibleNav(false);
@@ -822,12 +822,16 @@ $("#clearSelectedNav").onclick = () => { A.navSelected.clear(); renderNav(); };
 $("#enableSelectedNav").onclick = () => updateSelectedNav(true);
 $("#disableSelectedNav").onclick = () => updateSelectedNav(false);
 $("#deleteSelectedNav").onclick = async () => {
-  const selected = A.nav.filter((item) => A.navSelected.has(Number(item.id)));
-  if (!selected.length) return toast("请先选择导航项目");
-  if (!confirm(`确定删除选中的 ${selected.length} 个导航项目吗？此操作不可撤销。`)) return;
+  const ids = [...A.navSelected].map(Number);
+  if (!ids.length) return toast("请先选择导航项目");
+  if (!confirm(`确定删除选中的 ${ids.length} 个导航项目吗？此操作不可撤销。`)) return;
   try {
-    await Promise.all(selected.map((item) => api(`/api/admin/navigation/${item.id}`, { method: "DELETE" })));
-    toast(`已删除 ${selected.length} 项`);
+    const result = await api("/api/admin/navigation/bulk", {
+      method: "POST",
+      body: JSON.stringify({ ids, action: "delete" }),
+    });
+    A.navSelected.clear();
+    toast(`已删除 ${Number(result.affected || 0)} 项`);
     await loadAll();
   } catch (error) { toast(error.message); }
 };

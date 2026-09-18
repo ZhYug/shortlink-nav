@@ -82,3 +82,8 @@ temp/
 *.bak
 *.bak2
 *.bak3
+
+#压缩包文件
+*.zip
+*.rar
+*.7z
