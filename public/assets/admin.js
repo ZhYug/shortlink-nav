@@ -1,20 +1,7 @@
-const $ = (selector) => document.querySelector(selector);
-const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({
-  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
-}[c]));
-
-const A = { links: [], nav: [], settings: {} };
-
-async function api(url, options = {}) {
-  const response = await fetch(url, {
-    credentials: "same-origin",
-    ...options,
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || "请求失败");
-  return data;
-}
+const A = {
+  links: [], nav: [], settings: {}, navSelected: new Set(), navDirty: false,
+  linkPage: 1, navPage: 1, linkSelected: new Set(), linkSort: localStorage.getItem("stnav_link_sort") || "created_desc", linkPageSize: Number(localStorage.getItem("stnav_link_page_size")) || 10, navPageSize: Number(localStorage.getItem("stnav_nav_page_size")) || 12,
+};
 
 function toast(message) {
   const node = document.createElement("div");
@@ -22,6 +9,12 @@ function toast(message) {
   node.textContent = message;
   $("#toastRoot").appendChild(node);
   setTimeout(() => node.remove(), 2600);
+}
+
+function formData(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  data.enabled = form.elements.enabled?.checked ?? false;
+  return data;
 }
 
 async function boot() {
@@ -73,9 +66,10 @@ function switchSection(section) {
   $("#section-" + section).classList.remove("hidden");
   const map = {
     overview: ["OVERVIEW", "控制台"],
-    links: ["SHORT LINKS", "短链接"],
+    links: ["SHORT LINKS", "短链接管理"],
     navigation: ["NAVIGATION", "导航管理"],
-    settings: ["SETTINGS", "系统设置"],
+    settings: ["SYSTEM MANAGEMENT", "系统管理"],
+    data: ["DATA MANAGEMENT", "数据管理"],
   };
   $("#sectionEyebrow").textContent = map[section][0];
   $("#sectionTitle").textContent = map[section][1];
@@ -83,16 +77,16 @@ function switchSection(section) {
 
 async function loadAll() {
   try {
-    const [dashboard, links, navigation, settings] = await Promise.all([
-      api("/api/admin/dashboard"),
-      api("/api/admin/links"),
-      api("/api/admin/navigation"),
-      api("/api/admin/settings"),
-    ]);
-    A.links = links.items || [];
-    A.nav = navigation.items || [];
-    A.settings = settings.settings || {};
-    renderDashboard(dashboard);
+    const data = await api("/api/admin/bootstrap");
+    A.links = data.links || [];
+    A.nav = data.navigation || [];
+    A.settings = data.settings || {};
+    A.navSelected = new Set();
+    A.linkSelected = new Set();
+    A.navDirty = false;
+    A.linkPage = 1;
+    A.navPage = 1;
+    renderDashboard(data.dashboard || {});
     renderLinks();
     renderNav();
     fillSettings();
@@ -119,33 +113,53 @@ function renderDashboard(data) {
 
 function drawChart(rows) {
   const canvas = $("#clickChart");
-  const rect = canvas.getBoundingClientRect();
-  const ratio = window.devicePixelRatio || 1;
-  const width = Math.max(300, Math.floor(rect.width));
-  const height = Math.max(220, Math.floor(rect.height));
-  canvas.width = width * ratio;
-  canvas.height = height * ratio;
+  const wrap = canvas?.parentElement;
+  if (!canvas || !wrap) return;
+
+  // Use the chart container's content box instead of the canvas' intrinsic
+  // 300x150 size. The old implementation could make the canvas taller than
+  // .chart-wrap, causing the line to visually escape the panel on desktop
+  // and mobile. Keep a small minimum only for the drawing math, never the DOM.
+  const width = Math.max(1, Math.floor(wrap.clientWidth));
+  const height = Math.max(1, Math.floor(wrap.clientHeight));
+  const ratio = Math.max(1, window.devicePixelRatio || 1);
+  canvas.width = Math.round(width * ratio);
+  canvas.height = Math.round(height * ratio);
   const ctx = canvas.getContext("2d");
   ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-  const W = width, H = height, padding = 22;
+  const W = width, H = height;
+  const padding = Math.min(22, Math.max(12, Math.floor(Math.min(W, H) * 0.08)));
+  const lineWidth = 3;
+  const left = padding + lineWidth / 2;
+  const right = Math.max(left, W - padding - lineWidth / 2);
+  const top = padding + lineWidth / 2;
+  const bottom = Math.max(top, H - padding - lineWidth / 2);
   const max = Math.max(1, ...rows.map((row) => Number(row.clicks) || 0));
   const styles = getComputedStyle(document.documentElement);
+
   ctx.clearRect(0, 0, W, H);
   ctx.strokeStyle = styles.getPropertyValue("--border2");
   ctx.lineWidth = 1;
   for (let i = 0; i < 4; i++) {
     const y = padding + (H - padding * 2) * i / 3;
-    ctx.beginPath(); ctx.moveTo(padding, y); ctx.lineTo(W - padding, y); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(padding, y);
+    ctx.lineTo(W - padding, y);
+    ctx.stroke();
   }
   if (!rows.length) return;
+
   ctx.strokeStyle = styles.getPropertyValue("--primary");
-  ctx.lineWidth = 3;
+  ctx.lineWidth = lineWidth;
   ctx.lineJoin = "round";
   ctx.lineCap = "round";
   ctx.beginPath();
   rows.forEach((row, index) => {
-    const x = padding + (W - padding * 2) * index / Math.max(1, rows.length - 1);
-    const y = H - padding - (H - padding * 2) * ((Number(row.clicks) || 0) / max);
+    const x = rows.length === 1
+      ? (left + right) / 2
+      : left + (right - left) * index / (rows.length - 1);
+    const value = Math.max(0, Number(row.clicks) || 0);
+    const y = bottom - (bottom - top) * (value / max);
     index ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
   });
   ctx.stroke();
@@ -155,78 +169,317 @@ function linkedNav(item) {
   return A.nav.find((nav) => Number(nav.link_id) === Number(item.id));
 }
 
-function renderLinks() {
-  const query = ($("#linkSearch")?.value || "").toLowerCase();
-
-  const rows = A.links.filter((item) =>
-    [item.code, item.url, item.title, item.category]
-      .join(" ")
-      .toLowerCase()
-      .includes(query)
-  );
-
-  $("#linksTable").innerHTML = rows.map((item) => {
-    const linked = linkedNav(item);
-
-    return `
-      <tr class="link-dense-row">
-        <td>
-          <strong>/${esc(item.code)}</strong>
-        </td>
-
-        <td>
-          <div class="link-dense-title">
-            ${esc(item.title || item.url)}
-          </div>
-        </td>
-
-        <td>
-          <span class="status ${item.enabled ? "on" : "off"}">
-          ${item.enabled ? "启用" : "停用"}
-          </span>
-        </td>
-
-        <td>
-          <span class="click-count">${item.clicks || 0}</span>
-        </td>
-
-        <td>
-          <div class="row-actions compact-actions">
-            <button class="small-btn" data-act="nav" data-id="${item.id}">
-              ${linked ? "✓" : "+"}
-            </button>
-            <button class="small-btn qr-btn" data-act="qr" data-id="${item.id}">
-              QR
-            </button>
-            <button class="small-btn edit-btn" data-act="edit" data-id="${item.id}">
-              ✎
-            </button>
-            <button class="small-btn danger-btn del-btn" data-act="del" data-id="${item.id}">
-              ×
-            </button>
-          </div>
-        </td>
-      </tr>`;
-  }).join("") ||
-  '<tr><td colspan="5" style="text-align:center;padding:30px">暂无短链接</td></tr>';
+function renderPagination(container, page, total, pageSize, onChange) {
+  const node = $(container);
+  if (!node) return;
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  const current = Math.min(Math.max(1, page), pages);
+  const start = Math.max(1, Math.min(current - 2, pages - 4));
+  const end = Math.min(pages, start + 4);
+  const pageButtons = [];
+  for (let p = start; p <= end; p++) {
+    pageButtons.push(`<button class="page-btn ${p === current ? "active" : ""}" data-page="${p}">${p}</button>`);
+  }
+  node.innerHTML = `
+    <span class="pagination-info">共 ${total} 项，第 ${current}/${pages} 页</span>
+    <div class="pagination-actions">
+      <label class="page-size-label">每页 <select class="page-size-select">
+        ${[5,10,20,50].map((size) => `<option value="${size}" ${size === pageSize ? "selected" : ""}>${size}</option>`).join("")}
+      </select> 项</label>
+      <button class="page-btn" data-page="${current - 1}" ${current <= 1 ? "disabled" : ""}>上一页</button>
+      ${pageButtons.join("")}
+      <button class="page-btn" data-page="${current + 1}" ${current >= pages ? "disabled" : ""}>下一页</button>
+    </div>`;
+  node.querySelectorAll("[data-page]").forEach((button) => {
+    button.onclick = () => {
+      const target = Number(button.dataset.page);
+      if (target >= 1 && target <= pages && target !== current) onChange(target);
+    };
+  });
+  const sizeSelect = node.querySelector(".page-size-select");
+  if (sizeSelect) {
+    sizeSelect.onchange = () => {
+      const size = Number(sizeSelect.value);
+      if (!Number.isFinite(size) || size < 1) return;
+      onChange(1, size);
+    };
+  }
 }
 
-$("#linkSearch").oninput = renderLinks;
-$("#linksTable").onclick = (event) => {
+function getFilteredLinks() {
+  const query = ($("#linkSearch")?.value || "").trim().toLowerCase();
+  const rows = A.links.filter((item) =>
+    [item.code, item.url, item.title, item.category]
+      .join(" ").toLowerCase().includes(query)
+  );
+
+  const sort = A.linkSort || "created_desc";
+  const compareText = (a, b) => String(a ?? "").localeCompare(String(b ?? ""), "zh-CN", { numeric: true, sensitivity: "base" });
+  const compareNumber = (a, b) => (Number(a) || 0) - (Number(b) || 0);
+  rows.sort((a, b) => {
+    let result = 0;
+    switch (sort) {
+      case "created_asc": result = compareText(a.created_at, b.created_at); break;
+      case "clicks_desc": result = compareNumber(b.clicks, a.clicks); break;
+      case "clicks_asc": result = compareNumber(a.clicks, b.clicks); break;
+      case "code_asc": result = compareText(a.code, b.code); break;
+      case "code_desc": result = compareText(b.code, a.code); break;
+      case "favorite_desc": result = compareNumber(b.favorite, a.favorite); break;
+      case "created_desc":
+      default: result = compareText(b.created_at, a.created_at); break;
+    }
+    return result || compareNumber(Number(b.id), Number(a.id));
+  });
+  return rows;
+}
+
+function syncLinkSelection() {
+  const selected = [...A.linkSelected].filter((id) =>
+    A.links.some((item) => Number(item.id) === Number(id))
+  );
+  A.linkSelected = new Set(selected.map(Number));
+}
+
+function updateLinkBulkUi() {
+  syncLinkSelection();
+  const count = A.linkSelected.size;
+  const node = $("#linkSelectedCount");
+  if (node) node.textContent = `已选 ${count} 项`;
+  const selectedIds = new Set(A.linkSelected);
+  document.querySelectorAll("#linksTable .link-select, #linksMobileList .link-select").forEach((input) => {
+    input.checked = selectedIds.has(Number(input.dataset.id));
+  });
+}
+
+function selectVisibleLinks(all = false) {
+  const rows = getFilteredLinks();
+  const pages = Math.max(1, Math.ceil(rows.length / A.linkPageSize));
+  A.linkPage = Math.min(Math.max(1, A.linkPage), pages);
+  const offset = (A.linkPage - 1) * A.linkPageSize;
+  const targets = all ? rows : rows.slice(offset, offset + A.linkPageSize);
+  targets.forEach((item) => A.linkSelected.add(Number(item.id)));
+  renderLinks();
+  toast(all ? `已选择 ${targets.length} 项（当前筛选结果）` : `已选择本页 ${targets.length} 项`);
+}
+
+function clearSelectedLinks() {
+  A.linkSelected.clear();
+  updateLinkBulkUi();
+}
+
+async function toggleLinkFavorite(item) {
+  const next = !Number(item.favorite);
+  const previous = Number(item.favorite) ? 1 : 0;
+  item.favorite = next ? 1 : 0;
+  renderLinks();
+  try {
+    await api(`/api/admin/links/${item.id}/favorite`, {
+      method: "PATCH",
+      body: JSON.stringify({ favorite: next }),
+    });
+    toast(next ? `已收藏 /${item.code}` : `已取消收藏 /${item.code}`);
+  } catch (error) {
+    item.favorite = previous;
+    renderLinks();
+    toast(`收藏操作失败：${error.message}`);
+  }
+}
+
+function openShortLink(item) {
+  const url = item.short_url || `${location.origin}/${encodeURIComponent(item.code)}`;
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
+async function toggleLinkEnabled(item) {
+  const next = !Boolean(item.enabled);
+  const previous = Boolean(item.enabled);
+  item.enabled = next ? 1 : 0;
+  renderLinks();
+  try {
+    await api(`/api/admin/links/${item.id}/status`, {
+      method: "PATCH",
+      body: JSON.stringify({ enabled: next }),
+    });
+    toast(next ? `已启用 /${item.code}` : `已停用 /${item.code}`);
+  } catch (error) {
+    item.enabled = previous ? 1 : 0;
+    renderLinks();
+    toast(`状态修改失败：${error.message}`);
+  }
+}
+
+async function copyShortLink(item) {
+  const url = item.short_url || `${location.origin}/${item.code}`;
+  try {
+    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(url);
+    else {
+      const input = document.createElement("textarea");
+      input.value = url;
+      input.setAttribute("readonly", "");
+      input.style.position = "fixed";
+      input.style.opacity = "0";
+      document.body.appendChild(input);
+      input.select();
+      const ok = document.execCommand("copy");
+      input.remove();
+      if (!ok) throw new Error("浏览器未允许复制");
+    }
+    toast("短链接已复制");
+  } catch (error) {
+    toast(`复制失败：${error.message}`);
+  }
+}
+
+async function bulkLinkAction(action) {
+  syncLinkSelection();
+  const ids = [...A.linkSelected];
+  if (!ids.length) return toast("请先选择短链接");
+
+  const messages = {
+    add_navigation: "批量加入导航",
+    remove_navigation: "批量从导航移除",
+    enable: "批量启用",
+    disable: "批量停用",
+    delete: "批量删除",
+  };
+  if (action === "delete" && !confirm(`确定删除已选择的 ${ids.length} 个短链接吗？\n已关联的导航项目也会一起删除。`)) return;
+  if (action === "remove_navigation" && !confirm(`确定将已选择的 ${ids.length} 个短链接从导航中移除吗？\n不会删除短链接本身。`)) return;
+
+  const button = document.querySelector(`[data-bulk-action="${action}"]`);
+  if (button) button.disabled = true;
+  try {
+    const result = await api("/api/admin/links/bulk", {
+      method: "POST",
+      body: JSON.stringify({ ids, action }),
+    });
+    A.linkSelected.clear();
+    const failed = Number(result.failed || 0);
+    toast(`${messages[action]}完成：${Number(result.affected || 0)} 项${failed ? `，${failed} 项未处理` : ""}`);
+    await loadAll();
+  } catch (error) {
+    toast(`${messages[action]}失败：${error.message}`);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+function renderLinks() {
+  const rows = getFilteredLinks();
+  const pages = Math.max(1, Math.ceil(rows.length / A.linkPageSize));
+  A.linkPage = Math.min(Math.max(1, A.linkPage), pages);
+  const offset = (A.linkPage - 1) * A.linkPageSize;
+  const pageRows = rows.slice(offset, offset + A.linkPageSize);
+  const selectedIds = new Set(A.linkSelected);
+
+  $("#linksTable").innerHTML = pageRows.map((item) => {
+    const linked = linkedNav(item);
+    const id = Number(item.id);
+    return `
+      <tr class="link-dense-row">
+        <td data-label="选择" class="link-select-cell"><input class="link-select" type="checkbox" data-id="${id}" aria-label="选择 /${esc(item.code)}" ${selectedIds.has(id) ? "checked" : ""}></td>
+        <td data-label="短码"><strong>/${esc(item.code)}</strong></td>
+        <td data-label="目标"><div class="link-dense-title" title="${esc(item.title || item.url)}">${esc(item.title || item.url)}</div></td>
+        <td data-label="分类"><span class="link-category">${esc(item.category || "未分类")}</span></td>
+        <td data-label="点击"><span class="click-count">${Number(item.clicks || 0).toLocaleString()}</span></td>
+        <td data-label="状态"><button class="status status-toggle ${item.enabled ? "on" : "off"}" data-act="status" data-id="${id}" aria-label="${item.enabled ? "点击停用" : "点击启用"}" title="${item.enabled ? "点击停用" : "点击启用"}">${item.enabled ? "启用" : "停用"}</button></td>
+        <td data-label="操作"><div class="row-actions compact-actions">
+          <button class="small-btn favorite-btn ${item.favorite ? "is-favorite" : ""}" data-act="favorite" data-id="${id}" aria-label="${item.favorite ? "取消收藏" : "收藏"}" title="${item.favorite ? "取消收藏" : "收藏"}">${item.favorite ? "★" : "☆"}</button>
+          <button class="small-btn" data-act="nav" data-id="${id}" aria-label="${linked ? "已在导航" : "添加到导航"}" title="${linked ? "已在导航" : "添加到导航"}">${linked ? "✓" : "+"}</button>
+          <button class="small-btn edit-btn" data-act="edit" data-id="${id}" aria-label="编辑" title="编辑">✎</button>
+          <button class="small-btn" data-act="copy" data-id="${id}" aria-label="复制短链接" title="复制短链接">⧉</button>
+          <button class="small-btn" data-act="open" data-id="${id}" aria-label="打开短链接" title="打开短链接">↗</button>
+          <button class="small-btn danger-btn del-btn" data-act="del" data-id="${id}" aria-label="删除" title="删除">×</button>
+        </div></td>
+      </tr>`;
+  }).join("") || '<tr><td colspan="7" style="text-align:center;padding:30px">暂无短链接</td></tr>';
+
+  $("#linksMobileList").innerHTML = pageRows.map((item) => {
+    const linked = linkedNav(item);
+    const id = Number(item.id);
+    const title = item.title || item.url || "无标题";
+    return `
+      <div class="mobile-link-row">
+        <div class="mobile-link-main">
+          <input class="link-select mobile-link-select" type="checkbox" data-id="${id}" aria-label="选择 /${esc(item.code)}" ${selectedIds.has(id) ? "checked" : ""}>
+          <div class="mobile-link-copy">
+            <strong class="mobile-link-code">/${esc(item.code)}</strong>
+            <div class="mobile-link-meta" title="${esc(title)}">${esc(title)} · ${esc(item.category || "未分类")} · 点击 ${Number(item.clicks || 0).toLocaleString()}</div>
+          </div>
+        </div>
+        <button class="status status-toggle ${item.enabled ? "on" : "off"}" data-act="status" data-id="${id}" aria-label="${item.enabled ? "点击停用" : "点击启用"}" title="${item.enabled ? "点击停用" : "点击启用"}">${item.enabled ? "启用" : "停用"}</button>
+        <div class="mobile-link-actions">
+          <button class="mobile-link-action favorite-btn ${item.favorite ? "is-favorite" : ""}" data-act="favorite" data-id="${id}" aria-label="${item.favorite ? "取消收藏" : "收藏"}" title="${item.favorite ? "取消收藏" : "收藏"}">${item.favorite ? "★" : "☆"}</button>
+          <button class="mobile-link-action" data-act="nav" data-id="${id}" aria-label="${linked ? "已在导航" : "添加到导航"}" title="${linked ? "已在导航" : "添加到导航"}">${linked ? "✓" : "+"}</button>
+          <button class="mobile-link-action" data-act="edit" data-id="${id}" aria-label="编辑" title="编辑">✎</button>
+          <button class="mobile-link-action" data-act="copy" data-id="${id}" aria-label="复制短链接" title="复制短链接">⧉</button>
+          <button class="mobile-link-action" data-act="open" data-id="${id}" aria-label="打开短链接" title="打开短链接">↗</button>
+          <button class="mobile-link-action danger-btn" data-act="del" data-id="${id}" aria-label="删除" title="删除">×</button>
+        </div>
+      </div>`;
+  }).join("") || '<div class="mobile-link-empty">暂无短链接</div>';
+
+  renderPagination("#linksPagination", A.linkPage, rows.length, A.linkPageSize, (page, pageSize) => {
+    A.linkPage = page;
+    if (pageSize) { A.linkPageSize = pageSize; localStorage.setItem("stnav_link_page_size", String(pageSize)); }
+    renderLinks();
+  });
+  updateLinkBulkUi();
+}
+
+$("#linkSearch").oninput = () => { A.linkPage = 1; renderLinks(); };
+const linkSort = $("#linkSort");
+if (linkSort) {
+  linkSort.value = A.linkSort;
+  linkSort.onchange = () => {
+    A.linkSort = linkSort.value || "created_desc";
+    localStorage.setItem("stnav_link_sort", A.linkSort);
+    A.linkPage = 1;
+    renderLinks();
+  };
+}
+$("#selectPageLinks").onclick = () => selectVisibleLinks(false);
+$("#selectAllLinks").onclick = () => selectVisibleLinks(true);
+$("#clearSelectedLinks").onclick = clearSelectedLinks;
+$("#bulkAddNav").dataset.bulkAction = "add_navigation";
+$("#bulkRemoveNav").dataset.bulkAction = "remove_navigation";
+$("#bulkEnableLinks").dataset.bulkAction = "enable";
+$("#bulkDisableLinks").dataset.bulkAction = "disable";
+$("#bulkDeleteLinks").dataset.bulkAction = "delete";
+$("#bulkAddNav").onclick = () => bulkLinkAction("add_navigation");
+$("#bulkRemoveNav").onclick = () => bulkLinkAction("remove_navigation");
+$("#bulkEnableLinks").onclick = () => bulkLinkAction("enable");
+$("#bulkDisableLinks").onclick = () => bulkLinkAction("disable");
+$("#bulkDeleteLinks").onclick = () => bulkLinkAction("delete");
+
+function handleLinkListClick(event) {
+  const select = event.target.closest(".link-select");
+  if (select) {
+    const id = Number(select.dataset.id);
+    if (select.checked) A.linkSelected.add(id);
+    else A.linkSelected.delete(id);
+    updateLinkBulkUi();
+    return;
+  }
   const button = event.target.closest("[data-act]");
   if (!button) return;
   const item = A.links.find((value) => value.id == button.dataset.id);
   if (!item) return;
   if (button.dataset.act === "edit") linkModal(item);
   if (button.dataset.act === "del") deleteLink(item);
-  if (button.dataset.act === "qr") qrModal(item);
   if (button.dataset.act === "nav") addLinkToNavigation(item);
-};
+  if (button.dataset.act === "favorite") toggleLinkFavorite(item);
+  if (button.dataset.act === "copy") copyShortLink(item);
+  if (button.dataset.act === "open") openShortLink(item);
+  if (button.dataset.act === "status") toggleLinkEnabled(item);
+}
+
+$("#linksTable").onclick = handleLinkListClick;
+$("#linksMobileList").onclick = handleLinkListClick;
 
 function linkModal(item = null) {
   openModal(item ? "编辑短链接" : "新建短链接", `
     <form class="modal-form" id="linkForm">
-      <div class="two"><label>短码（留空自动生成）<input name="code" value="${esc(item?.code || "")}" placeholder="例如 docs"></label><label>分类<input name="category" value="${esc(item?.category || "")}" placeholder="工作"></label></div>
+      <div class="two"><label>短码（留空自动生成）<input name="code" value="${esc(item?.code || "")}" placeholder="例如 docs" autocomplete="off" spellcheck="false"><small id="linkCodeCheck" class="link-code-check" aria-live="polite"></small></label><label>分类<input name="category" value="${esc(item?.category || "")}" placeholder="工作"></label></div>
       <label>目标 URL<input name="url" required value="${esc(item?.url || "")}" placeholder="https://example.com"></label>
       <label>标题<input name="title" value="${esc(item?.title || "")}"></label>
       <label>描述<textarea name="description" rows="3">${esc(item?.description || "")}</textarea></label>
@@ -234,11 +487,71 @@ function linkModal(item = null) {
       <button class="btn primary">保存</button>
     </form>
   `);
+  const codeInput = $("#linkForm input[name=code]");
+  const codeCheck = $("#linkCodeCheck");
+  let codeCheckTimer = null;
+  let codeCheckSeq = 0;
+  let codeAvailable = !codeInput.value.trim();
+
+  const renderCodeCheck = (state, message = "") => {
+    if (!codeCheck) return;
+    codeCheck.className = `link-code-check ${state || ""}`.trim();
+    codeCheck.textContent = message;
+  };
+
+  const checkCodeAvailability = async () => {
+    const code = codeInput.value.trim();
+    codeAvailable = !code;
+    if (!code) {
+      renderCodeCheck("", "留空将自动生成");
+      return;
+    }
+    if (!/^[A-Za-z0-9_-]{2,64}$/.test(code)) {
+      codeAvailable = false;
+      renderCodeCheck("invalid", "格式：2-64 位字母、数字、_、-");
+      return;
+    }
+    renderCodeCheck("checking", "检查中…");
+    const seq = ++codeCheckSeq;
+    try {
+      const params = new URLSearchParams({ code });
+      if (item) params.set("exclude_id", String(item.id));
+      const result = await api(`/api/admin/links/check-code?${params.toString()}`);
+      if (seq !== codeCheckSeq) return;
+      codeAvailable = Boolean(result.available);
+      renderCodeCheck(codeAvailable ? "available" : "unavailable", result.message || (codeAvailable ? "短码可用" : "短码不可用"));
+    } catch (error) {
+      if (seq !== codeCheckSeq) return;
+      codeAvailable = false;
+      renderCodeCheck("error", `检查失败：${error.message}`);
+    }
+  };
+
+  codeInput.oninput = () => {
+    clearTimeout(codeCheckTimer);
+    codeCheckSeq++;
+    codeAvailable = !codeInput.value.trim();
+    if (!codeInput.value.trim()) {
+      renderCodeCheck("", "留空将自动生成");
+      return;
+    }
+    renderCodeCheck("checking", "检查中…");
+    codeCheckTimer = setTimeout(checkCodeAvailability, 350);
+  };
+  checkCodeAvailability();
+
   $("#linkForm").onsubmit = async (event) => {
     event.preventDefault();
-    const form = new FormData(event.target);
-    const data = Object.fromEntries(form.entries());
-    data.enabled = form.get("enabled") === "on";
+    const data = formData(event.target);
+    const code = String(data.code || "").trim();
+    if (code && !codeAvailable) {
+      await checkCodeAvailability();
+      if (!codeAvailable) {
+        toast("请使用可用的短码");
+        codeInput.focus();
+        return;
+      }
+    }
     try {
       await api(item ? `/api/admin/links/${item.id}` : "/api/admin/links", {
         method: item ? "PUT" : "POST",
@@ -251,20 +564,19 @@ function linkModal(item = null) {
 
 async function addLinkToNavigation(item) {
   const exists = linkedNav(item);
-  if (exists) {
-    toast("这个短链接已经在导航里了");
-    switchSection("navigation");
-    return;
-  }
   try {
-    await api("/api/admin/navigation", {
-      method: "POST",
-      body: JSON.stringify({ link_id: item.id, enabled: item.enabled !== false }),
-    });
-    toast("已添加到导航");
+    if (exists) {
+      await api(`/api/admin/navigation/${exists.id}`, { method: "DELETE" });
+      toast("已从导航移除");
+    } else {
+      await api("/api/admin/navigation", {
+        method: "POST",
+        body: JSON.stringify({ link_id: item.id, enabled: item.enabled !== false }),
+      });
+      toast("已添加到导航");
+    }
     await loadAll();
   } catch (error) {
-    if (error.message.includes("已经在导航")) switchSection("navigation");
     toast(error.message);
   }
 }
@@ -279,161 +591,245 @@ async function deleteLink(item) {
   catch (error) { toast(error.message); }
 }
 
-function qrModal(item) {
-  openModal(
-    "短链接二维码",
-    `
-    <div style="text-align:center">
-      <div class="qr-box">
-        <canvas id="qrCanvas"></canvas>
-      </div>
-      <strong>/${esc(item.code)}</strong>
-      <p style="color:var(--muted);word-break:break-all">
-        ${esc(location.origin + "/" + item.code)}
-      </p>
-      <button class="btn primary" id="downloadQr">
-        下载二维码
-      </button>
-    </div>
-    `
-  );
-
-  setTimeout(() => {
-    const canvas = document.getElementById("qrCanvas");
-
-    if (!canvas) {
-      toast("二维码容器不存在");
-      return;
-    }
-
-    if (typeof QRCode === "undefined") {
-      toast("二维码库未加载");
-      return;
-    }
-
-    QRCode.toCanvas(
-      canvas,
-      `${location.origin}/${item.code}`,
-      {
-        width:220,
-        margin:1
-      },
-      (error)=>{
-        if(error){
-          console.error("QRCode error:", error);
-          toast("二维码生成失败");
-        }
-      }
-    );
-
-    const btn = document.getElementById("downloadQr");
-
-    if(btn){
-      btn.onclick = ()=>{
-        const link=document.createElement("a");
-        link.href=canvas.toDataURL("image/png");
-        link.download=`${item.code}-qrcode.png`;
-        link.click();
-      };
-    }
-
-  },100);
-}
 
 $("#addLinkBtn").onclick = () => linkModal();
 $("#addNavBtn").onclick = () => navModal();
 
-function iconUrl(url) {
-  try {
-    const host = new URL(url).hostname;
-    return `https://icons.duckduckgo.com/ip3/${host}.ico`;
-  } catch {
-    return "";
-  }
-}
-
-function fallbackIcon(item) {
-  const icons = ["🌐", "🔗", "⭐", "🚀", "🧭", "💡", "🛠️", "🎯", "📌", "✨", "🪐", "⚡"];
-  const text = `${item.id || ""}${item.title || ""}${item.category || ""}`;
-  let hash = 0;
-  for (const char of text) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
-  return icons[hash % icons.length];
-}
-
 function navIcon(item) { return item.icon || iconUrl(item.url); }
 
+function navFilteredItems() {
+  const query = String($("#navSearch")?.value || "").trim().toLowerCase();
+  const category = String($("#navCategoryFilter")?.value || "");
+  return A.nav.filter((item) => {
+    const haystack = [item.title, item.url, item.description, item.category].join(" ").toLowerCase();
+    return (!query || haystack.includes(query)) && (!category || (item.category || "未分类") === category);
+  });
+}
+
+function refreshNavFilters() {
+  const select = $("#navCategoryFilter");
+  if (!select) return;
+  const current = select.value;
+  const categories = [...new Set(A.nav.map((item) => item.category || "未分类"))].sort((a, b) => a.localeCompare(b, "zh-CN"));
+  select.innerHTML = '<option value="">全部分类</option>' + categories.map((category) => `<option value="${esc(category)}">${esc(category)}</option>`).join("");
+  select.value = categories.includes(current) ? current : "";
+}
+
 function renderNav() {
+  refreshNavFilters();
   const element = $("#navAdminGrid");
-  element.innerHTML = A.nav.map((item) => `
-    <div class="admin-nav-card" draggable="true" data-id="${item.id}">
+  const items = navFilteredItems();
+  const pages = Math.max(1, Math.ceil(items.length / A.navPageSize));
+  A.navPage = Math.min(Math.max(1, A.navPage), pages);
+  const pageItems = items.slice((A.navPage - 1) * A.navPageSize, A.navPage * A.navPageSize);
+  const filtered = items.length !== A.nav.length;
+  $("#navCount").innerHTML = (filtered ? `${items.length} / ${A.nav.length} 项` : `${A.nav.length} 项`) + (A.navDirty ? '<span class="nav-dirty">未保存</span>' : '');
+  const selectedCount = $("#navSelectedCount");
+  if (selectedCount) selectedCount.textContent = `已选 ${A.navSelected.size} 项`;
+  $("#navFilterHint").classList.toggle("hidden", !filtered);
+  element.innerHTML = pageItems.map((item) => `
+    <div class="admin-nav-card ${A.navSelected.has(Number(item.id)) ? "selected" : ""}" draggable="${filtered ? "false" : "true"}" data-id="${item.id}">
       <div class="admin-nav-head">
-        <div class="admin-icon-wrap">
+        <div class="admin-nav-selection"><input type="checkbox" data-navact="select" data-id="${item.id}" ${A.navSelected.has(Number(item.id)) ? "checked" : ""} aria-label="选择 ${esc(item.title)}"><div class="admin-icon-wrap">
           <img class="site-icon" src="${esc(navIcon(item))}" alt="" onerror="this.outerHTML='<span class=&quot;site-icon site-icon-fallback&quot;>${esc(fallbackIcon(item))}</span>'">
-        </div>
+        </div></div>
         <div class="admin-nav-title"><strong>${esc(item.title)}</strong><small>${esc(item.category || "未分类")}</small></div>
         <span class="drag-handle">⠿</span>
       </div>
       <p>${esc(item.description || item.url)}</p>
-      <div class="nav-admin-badges">
-        ${item.link_id ? '<span class="linked-badge">短链接关联</span>' : '<span class="manual-badge">手动导航</span>'}
+      <div class="nav-admin-meta">
+        <div class="nav-admin-badges">${item.link_id ? '<span class="linked-badge">短链接</span>' : '<span class="manual-badge">手动</span>'}<span class="nav-order-badge">#${Number(item.sort_order ?? 0) + 1}</span></div>
+        <span class="nav-url" title="${esc(item.url)}">${esc(item.url)}</span>
       </div>
       <div class="row-actions nav-admin-actions">
-        <button class="small-btn" data-navact="copy" data-id="${item.id}">复制链接</button>
-        <button class="small-btn" data-navact="edit" data-id="${item.id}">编辑</button>
-        <button class="small-btn danger-btn" data-navact="del" data-id="${item.id}">删除</button>
+        <button class="small-btn nav-move-btn" data-navact="up" data-id="${item.id}" aria-label="上移" title="上移">↑</button>
+        <button class="small-btn nav-move-btn" data-navact="down" data-id="${item.id}" aria-label="下移" title="下移">↓</button>
+        <button class="small-btn" data-navact="edit" data-id="${item.id}" aria-label="编辑" title="编辑">✎</button>
+        <button class="small-btn" data-navact="open" data-id="${item.id}" aria-label="打开链接" title="打开链接">↗</button>
+        <button class="small-btn" data-navact="copy" data-id="${item.id}" aria-label="复制链接" title="复制链接">⧉</button>
+        <button class="small-btn favorite-btn ${item.favorite ? "is-favorite" : ""}" data-navact="favorite" data-id="${item.id}" aria-label="${item.favorite ? "取消收藏" : "收藏"}" title="${item.favorite ? "取消收藏" : "收藏"}">${item.favorite ? "★" : "☆"}</button>
+        <button class="status status-toggle nav-status-toggle ${item.enabled ? "on" : "off"}" data-navact="status" data-id="${item.id}" aria-label="${item.enabled ? "点击停用" : "点击启用"}" title="${item.enabled ? "点击停用" : "点击启用"}">${item.enabled ? "启用" : "停用"}</button>
       </div>
     </div>
   `).join("") || '<div class="panel" style="padding:30px">暂无导航</div>';
+  renderPagination("#navPagination", A.navPage, items.length, A.navPageSize, (page, pageSize) => {
+    A.navPage = page;
+    if (pageSize) { A.navPageSize = pageSize; localStorage.setItem("stnav_nav_page_size", String(pageSize)); }
+    renderNav();
+  });
   bindDrag();
 }
 
 function bindDrag() {
+  const isFiltered = !!($("#navSearch")?.value || $("#navCategoryFilter")?.value);
+  if (isFiltered) return;
   let dragging = null;
   document.querySelectorAll(".admin-nav-card").forEach((card) => {
-    card.ondragstart = () => { dragging = card; card.classList.add("dragging"); };
-    card.ondragend = () => { card.classList.remove("dragging"); dragging = null; };
+    card.ondragstart = (event) => {
+      dragging = card;
+      card.classList.add("dragging");
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", card.dataset.id);
+    };
+    card.ondragend = () => {
+      card.classList.remove("dragging");
+      dragging = null;
+    };
     card.ondragover = (event) => {
       event.preventDefault();
       if (!dragging || dragging === card) return;
       const rect = card.getBoundingClientRect();
       card.parentNode.insertBefore(dragging, event.clientY > rect.top + rect.height / 2 ? card.nextSibling : card);
     };
+    card.ondrop = (event) => {
+      event.preventDefault();
+      if (!dragging) return;
+      const visibleIds = [...document.querySelectorAll(".admin-nav-card")].map((node) => Number(node.dataset.id));
+      const visibleSet = new Set(visibleIds);
+      const positions = A.nav.map((item, index) => visibleSet.has(Number(item.id)) ? index : -1).filter((index) => index >= 0);
+      const reordered = visibleIds.map((id) => A.nav.find((item) => Number(item.id) === id)).filter(Boolean);
+      positions.forEach((position, index) => { A.nav[position] = reordered[index]; });
+      A.nav.forEach((value, index) => { value.sort_order = index; });
+      A.navDirty = true;
+      renderNav();
+      toast("顺序已调整，点击“保存排序”后生效");
+    };
   });
 }
 
-async function copyText(text) {
+
+function navOpenUrl(item) {
+  return item.link_id && item.code
+    ? `${location.origin}/${encodeURIComponent(item.code)}`
+    : item.url;
+}
+
+async function toggleNavFavorite(item) {
+  const next = !Number(item.favorite);
+  const previous = Number(item.favorite) ? 1 : 0;
+  item.favorite = next ? 1 : 0;
+  renderNav();
   try {
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch {
-    const input = document.createElement("textarea");
-    input.value = text;
-    input.style.position = "fixed";
-    input.style.opacity = "0";
-    document.body.appendChild(input);
-    input.focus();
-    input.select();
-    let ok = false;
-    try { ok = document.execCommand("copy"); } catch {}
-    input.remove();
-    return ok;
+    await api(`/api/admin/navigation/${item.id}/favorite`, {
+      method: "PATCH",
+      body: JSON.stringify({ favorite: next }),
+    });
+    toast(next ? `已收藏「${item.title}」` : `已取消收藏「${item.title}」`);
+  } catch (error) {
+    item.favorite = previous;
+    renderNav();
+    toast(`收藏操作失败：${error.message}`);
   }
+}
+
+async function toggleNavEnabled(item) {
+  const next = !Boolean(item.enabled);
+  const previous = Boolean(item.enabled);
+  item.enabled = next ? 1 : 0;
+  renderNav();
+  try {
+    await api(`/api/admin/navigation/${item.id}/status`, {
+      method: "PATCH",
+      body: JSON.stringify({ enabled: next }),
+    });
+    toast(next ? `已启用「${item.title}」` : `已停用「${item.title}」`);
+  } catch (error) {
+    item.enabled = previous ? 1 : 0;
+    renderNav();
+    toast(`状态修改失败：${error.message}`);
+  }
+}
+
+function openNavLink(item) {
+  window.open(navOpenUrl(item), "_blank", "noopener,noreferrer");
+}
+
+async function copyNavLink(item) {
+  toast(await copyText(navOpenUrl(item)) ? "链接已复制" : "复制失败");
 }
 
 $("#navAdminGrid").onclick = async (event) => {
   const button = event.target.closest("[data-navact]");
   if (!button) return;
+  if (button.dataset.navact === "select") {
+    const id = Number(button.dataset.id);
+    if (button.checked) A.navSelected.add(id); else A.navSelected.delete(id);
+    renderNav();
+    return;
+  }
   const item = A.nav.find((value) => value.id == button.dataset.id);
   if (!item) return;
   if (button.dataset.navact === "edit") navModal(item);
   if (button.dataset.navact === "del") deleteNav(item);
-  if (button.dataset.navact === "copy") toast(await copyText(item.url) ? "链接已复制" : "复制失败");
+  if (button.dataset.navact === "open") openNavLink(item);
+  if (button.dataset.navact === "copy") copyNavLink(item);
+  if (button.dataset.navact === "favorite") toggleNavFavorite(item);
+  if (button.dataset.navact === "status") toggleNavEnabled(item);
+  if (button.dataset.navact === "up" || button.dataset.navact === "down") {
+    const currentIndex = A.nav.findIndex((value) => Number(value.id) === Number(item.id));
+    const targetIndex = currentIndex + (button.dataset.navact === "up" ? -1 : 1);
+    if (currentIndex >= 0 && targetIndex >= 0 && targetIndex < A.nav.length) {
+      [A.nav[currentIndex], A.nav[targetIndex]] = [A.nav[targetIndex], A.nav[currentIndex]];
+      A.nav.forEach((value, index) => { value.sort_order = index; });
+      A.navDirty = true;
+      renderNav();
+      toast("顺序已调整，点击“保存排序”后生效");
+    }
+  }
+};
+
+$("#navSearch").oninput = () => { A.navPage = 1; renderNav(); };
+$("#navCategoryFilter").onchange = () => { A.navPage = 1; renderNav(); };
+$("#clearNavFilter").onclick = () => {
+  $("#navSearch").value = "";
+  $("#navCategoryFilter").value = "";
+  renderNav();
 };
 
 $("#saveNavOrder").onclick = async () => {
-  const ids = [...document.querySelectorAll(".admin-nav-card")].map((node) => Number(node.dataset.id));
-  try { await api("/api/admin/navigation/reorder", { method: "POST", body: JSON.stringify({ ids }) }); toast("排序已保存"); await loadAll(); }
+  const ids = A.nav.map((item) => Number(item.id));
+  try { await api("/api/admin/navigation/reorder", { method: "POST", body: JSON.stringify({ ids }) }); A.navDirty = false; toast("排序已保存"); await loadAll(); }
   catch (error) { toast(error.message); }
+};
+
+async function updateSelectedNav(enabled) {
+  const selected = A.nav.filter((item) => A.navSelected.has(Number(item.id)));
+  if (!selected.length) return toast("请先选择导航项目");
+  try {
+    await Promise.all(selected.map((item) => api(`/api/admin/navigation/${item.id}/status`, {
+      method: "PATCH",
+      body: JSON.stringify({ enabled }),
+    })));
+    toast(enabled ? `已启用 ${selected.length} 项` : `已停用 ${selected.length} 项`);
+    await loadAll();
+  } catch (error) { toast(error.message); }
+}
+
+function selectVisibleNav(all = false) {
+  const rows = navFilteredItems();
+  const pages = Math.max(1, Math.ceil(rows.length / A.navPageSize));
+  A.navPage = Math.min(Math.max(1, A.navPage), pages);
+  const offset = (A.navPage - 1) * A.navPageSize;
+  const targets = all ? rows : rows.slice(offset, offset + A.navPageSize);
+  targets.forEach((item) => A.navSelected.add(Number(item.id)));
+  renderNav();
+  toast(all ? `已选择 ${targets.length} 项（当前筛选结果）` : `已选择本页 ${targets.length} 项`);
+}
+
+$("#selectPageNav").onclick = () => selectVisibleNav(false);
+$("#selectAllNav").onclick = () => selectVisibleNav(true);
+$("#clearSelectedNav").onclick = () => { A.navSelected.clear(); renderNav(); };
+$("#enableSelectedNav").onclick = () => updateSelectedNav(true);
+$("#disableSelectedNav").onclick = () => updateSelectedNav(false);
+$("#deleteSelectedNav").onclick = async () => {
+  const selected = A.nav.filter((item) => A.navSelected.has(Number(item.id)));
+  if (!selected.length) return toast("请先选择导航项目");
+  if (!confirm(`确定删除选中的 ${selected.length} 个导航项目吗？此操作不可撤销。`)) return;
+  try {
+    await Promise.all(selected.map((item) => api(`/api/admin/navigation/${item.id}`, { method: "DELETE" })));
+    toast(`已删除 ${selected.length} 项`);
+    await loadAll();
+  } catch (error) { toast(error.message); }
 };
 
 function navModal(item = null) {
@@ -450,9 +846,7 @@ function navModal(item = null) {
   `);
   $("#navForm").onsubmit = async (event) => {
     event.preventDefault();
-    const form = new FormData(event.target);
-    const data = Object.fromEntries(form.entries());
-    data.enabled = form.get("enabled") === "on";
+    const data = formData(event.target);
     if (item?.link_id) return;
     try {
       await api(item ? `/api/admin/navigation/${item.id}` : "/api/admin/navigation", {
@@ -473,6 +867,21 @@ async function deleteNav(item) {
   catch (error) { toast(error.message); }
 }
 
+function initSettingsTabs() {
+  const tabs = [...document.querySelectorAll("[data-settings-tab]")];
+  const panels = [...document.querySelectorAll("[data-settings-panel]")];
+  if (!tabs.length) return;
+  const activate = (name) => {
+    tabs.forEach((tab) => {
+      const active = tab.dataset.settingsTab === name;
+      tab.classList.toggle("active", active);
+      tab.setAttribute("aria-selected", String(active));
+    });
+    panels.forEach((panel) => panel.classList.toggle("hidden", panel.dataset.settingsPanel !== name));
+  };
+  tabs.forEach((tab) => tab.addEventListener("click", () => activate(tab.dataset.settingsTab)));
+}
+
 function fillSettings() {
   const form = $("#settingsForm");
   ["site_title", "site_subtitle", "site_description", "hero_title", "hero_description", "accent", "nav_tag_style", "nav_columns_mobile", "nav_columns_tablet", "nav_columns_desktop", "nav_columns_wide", "nav_category_order", "nav_hidden_categories"].forEach((key) => {
@@ -484,7 +893,7 @@ function fillSettings() {
 
 $("#settingsForm").onsubmit = async (event) => {
   event.preventDefault();
-  const data = Object.fromEntries(new FormData(event.target).entries());
+  const data = formData(event.target);
   try {
     await api("/api/admin/settings", { method: "PUT", body: JSON.stringify(data) });
     A.settings = { ...A.settings, ...data };
@@ -502,48 +911,217 @@ function closeModal() { $("#modal").classList.add("hidden"); }
 document.querySelectorAll("[data-close-modal]").forEach((node) => node.onclick = closeModal);
 document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeModal(); });
 
-$("#exportLinks").onclick = () => {
-  const headers = ["code", "url", "title", "description", "category", "enabled"];
-  const csv = [headers.join(","), ...A.links.map((item) => headers.map((key) => `"${String(item[key] ?? "").replaceAll('"', '""')}"`).join(","))].join("\n");
-  const link = document.createElement("a");
-  link.href = URL.createObjectURL(new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" }));
-  link.download = "shortlinks.csv";
-  link.click();
-  URL.revokeObjectURL(link.href);
-};
+const csvInput = $("#csvFile");
+const dataCsvInput = $("#dataCsvFile");
+const csvImportButton = $("#importLinksBtn");
+const dataCsvButton = $("#dataCsvBtn");
+const dataExportCsvButton = $("#dataExportCsvBtn");
 
-$("#importLinksBtn").onclick = () => $("#csvFile").click();
-$("#csvFile").onchange = async (event) => {
-  const file = event.target.files[0];
-  if (!file) return;
-  const text = await file.text();
-  const lines = text.replace(/^\ufeff/, "").split(/\r?\n/).filter(Boolean);
-  if (lines.length < 2) { toast("CSV 没有数据"); return; }
-  const parseCsvLine = (line) => {
-    const values = [];
-    let current = "", quoted = false;
-    for (let i = 0; i < line.length; i++) {
-      const char = line[i];
-      if (char === '"' && line[i + 1] === '"') { current += '"'; i++; }
-      else if (char === '"') quoted = !quoted;
-      else if (char === "," && !quoted) { values.push(current); current = ""; }
-      else current += char;
-    }
-    values.push(current);
-    return values;
-  };
-  const headers = parseCsvLine(lines[0]).map((x) => x.trim());
-  let success = 0;
-  for (const line of lines.slice(1)) {
-    const values = parseCsvLine(line), data = {};
-    headers.forEach((key, index) => data[key] = values[index] || "");
-    data.enabled = data.enabled !== "false";
-    try { await api("/api/admin/links", { method: "POST", body: JSON.stringify(data) }); success++; } catch {}
+function exportLinksCsv(filename = "shortlinks.csv") {
+  const headers = ["code", "url", "title", "description", "category", "enabled", "favorite"];
+  const escapeCsv = (value) => `"${String(value ?? "").replaceAll('"', '""')}"`;
+  const rows = A.links.map((item) => headers.map((key) => escapeCsv(item[key])).join(","));
+  const csv = [headers.join(","), ...rows].join("\r\n");
+  downloadBlob(new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" }), filename);
+  toast(`CSV 导出完成：${A.links.length} 条短链接`);
+}
+
+$("#exportLinks").onclick = () => exportLinksCsv();
+dataExportCsvButton?.addEventListener("click", () => exportLinksCsv("shortlinks.csv"));
+
+const restoreJsonInput = $("#restoreJsonFile");
+const restoreJsonButton = $("#restoreJsonBtn");
+const backupJsonButton = $("#backupJsonBtn");
+
+function downloadBlob(blob, filename) {
+  const href = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = href;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(href), 1000);
+}
+
+function downloadJson(data, filename) {
+  downloadBlob(new Blob(["\ufeff", JSON.stringify(data, null, 2)], { type: "application/json;charset=utf-8" }), filename);
+}
+
+function parseCsv(text) {
+  const rows = [];
+  let row = [], cell = "", quoted = false;
+  const source = String(text || "").replace(/^\uFEFF/, "");
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i], next = source[i + 1];
+    if (ch === '"') {
+      if (quoted && next === '"') { cell += '"'; i++; }
+      else quoted = !quoted;
+    } else if (ch === "," && !quoted) {
+      row.push(cell); cell = "";
+    } else if ((ch === "\n" || ch === "\r") && !quoted) {
+      if (ch === "\r" && next === "\n") i++;
+      row.push(cell); cell = "";
+      if (row.some((value) => value.trim() !== "")) rows.push(row);
+      row = [];
+    } else cell += ch;
   }
-  toast(`导入完成：${success} 条`);
-  event.target.value = "";
-  await loadAll();
-};
+  if (quoted) throw new Error("CSV 引号不匹配");
+  if (cell !== "" || row.length) {
+    row.push(cell);
+    if (row.some((value) => value.trim() !== "")) rows.push(row);
+  }
+  return rows;
+}
+
+function normalizeCsvRows(rows) {
+  if (rows.length < 2) throw new Error("CSV 没有可导入的数据");
+  const headers = rows[0].map((value) => value.trim().toLowerCase());
+  const required = ["code", "url"];
+  const missing = required.filter((key) => !headers.includes(key));
+  if (missing.length) throw new Error(`CSV 缺少必需列：${missing.join(", ")}`);
+  const seen = new Map();
+  return rows.slice(1).map((values, index) => {
+    const data = {};
+    headers.forEach((key, col) => { data[key] = String(values[col] ?? "").trim(); });
+    data.enabled = !["false", "0", "no", "否", "停用"].includes(String(data.enabled).toLowerCase());
+    const code = data.code;
+    const duplicateInFile = code && seen.has(code);
+    if (code) seen.set(code, index + 2);
+    let error = "";
+    if (!code) error = "缺少短码";
+    else if (!/^[A-Za-z0-9_-]{2,64}$/.test(code)) error = "短码格式无效";
+    if (!data.url) error = error || "缺少 URL";
+    else {
+      try { const u = new URL(data.url); if (!["http:", "https:"].includes(u.protocol)) error = error || "URL 必须是 http/https"; }
+      catch { error = error || "URL 格式无效"; }
+    }
+    if (duplicateInFile) error = error || `与第 ${seen.get(code)} 行重复`;
+    const existing = A.links.find((item) => item.code === code);
+    return { row: index + 2, ...data, existingId: existing ? Number(existing.id) : null, conflict: Boolean(existing), error };
+  });
+}
+
+function openCsvPicker(input) {
+  if (!input) return;
+  input.value = "";
+  input.click();
+}
+csvImportButton?.addEventListener("click", () => openCsvPicker(csvInput));
+dataCsvButton?.addEventListener("click", () => openCsvPicker(dataCsvInput));
+
+function csvPreviewModal(items, filename) {
+  const valid = items.filter((item) => !item.error);
+  const conflicts = valid.filter((item) => item.conflict);
+  const invalid = items.filter((item) => item.error);
+  const statusText = `${items.length} 行，${valid.length} 条可导入，${conflicts.length} 条重复，${invalid.length} 条有问题`;
+  openModal("CSV 导入预览", `
+    <div class="import-summary"><strong>${esc(filename)}</strong><span>${statusText}</span></div>
+    <div class="import-options">
+      <label>重复短码处理<select id="csvConflictMode"><option value="skip">跳过重复</option><option value="update">覆盖已有</option><option value="rename">自动生成新短码</option></select></label>
+    </div>
+    <div class="import-preview-scroll"><table class="import-preview-table"><thead><tr><th>行</th><th>短码</th><th>目标</th><th>状态</th></tr></thead><tbody>
+      ${items.slice(0, 500).map((item) => `<tr><td>${item.row}</td><td><strong>${esc(item.code || "—")}</strong></td><td title="${esc(item.url || "")}">${esc(item.url || "—")}</td><td><span class="import-status ${item.error ? "bad" : item.conflict ? "warn" : "good"}">${esc(item.error || (item.conflict ? "重复" : "新增"))}</span></td></tr>`).join("")}
+    </tbody></table></div>
+    ${items.length > 500 ? '<div class="form-note">预览最多显示前 500 行，实际导入仍会处理全部行。</div>' : ''}
+    <div class="modal-actions"><button type="button" class="btn secondary" id="csvPreviewCancel">取消</button><button type="button" class="btn primary" id="csvPreviewImport">开始导入</button></div>
+  `);
+  $("#csvPreviewCancel").onclick = closeModal;
+  $("#csvPreviewImport").onclick = async () => {
+    const mode = $("#csvConflictMode").value;
+    const button = $("#csvPreviewImport");
+    button.disabled = true;
+    try {
+      const candidates = items.filter((item) => !item.error);
+      let success = 0, skipped = 0, failed = 0;
+      for (let i = 0; i < candidates.length; i += 25) {
+        const chunk = candidates.slice(i, i + 25);
+        const result = await api("/api/admin/links/import", {
+          method: "POST",
+          body: JSON.stringify({ mode, rows: chunk.map(({ row, existingId, conflict, error, ...data }) => ({ ...data, existing_id: existingId })) }),
+        });
+        success += Number(result.imported || 0);
+        skipped += Number(result.skipped || 0);
+        failed += Number(result.failed || 0);
+      }
+      closeModal();
+      toast(`CSV 导入完成：成功 ${success} 条${skipped ? `，跳过 ${skipped} 条` : ""}${failed ? `，失败 ${failed} 条` : ""}`);
+      await loadAll();
+    } catch (error) {
+      toast(`CSV 导入失败：${error.message}`);
+      button.disabled = false;
+    }
+  };
+}
+
+async function handleCsvFile(file) {
+  if (!file) return;
+  if (!/\.csv$/i.test(file.name || "")) throw new Error("请选择扩展名为 .csv 的文件");
+  if (file.size === 0) throw new Error("CSV 文件为空");
+  if (file.size > 10 * 1024 * 1024) throw new Error("CSV 文件不能超过 10 MB");
+  const items = normalizeCsvRows(parseCsv(await file.text()));
+  csvPreviewModal(items, file.name);
+}
+
+for (const input of [csvInput, dataCsvInput]) {
+  input?.addEventListener("change", async (event) => {
+    const file = event.currentTarget.files?.[0];
+    try { await handleCsvFile(file); }
+    catch (error) { toast(`CSV 预览失败：${error.message || "读取文件失败"}`); }
+    finally { event.currentTarget.value = ""; }
+  });
+}
+
+async function createJsonBackup() {
+  const data = await api("/api/admin/backup");
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  downloadJson(data, `st-nav-backup-${stamp}.json`);
+  toast(`JSON 备份完成：${Number(data.meta?.links || 0)} 个短链接，${Number(data.meta?.navigation || 0)} 个导航`);
+}
+backupJsonButton?.addEventListener("click", async () => {
+  try { backupJsonButton.disabled = true; await createJsonBackup(); }
+  catch (error) { toast(`备份失败：${error.message}`); }
+  finally { backupJsonButton.disabled = false; }
+});
+
+restoreJsonButton?.addEventListener("click", () => openCsvPicker(restoreJsonInput));
+restoreJsonInput?.addEventListener("change", async (event) => {
+  const file = event.currentTarget.files?.[0];
+  try {
+    if (!file) return;
+    if (!/\.json$/i.test(file.name || "")) throw new Error("请选择 JSON 备份文件");
+    if (file.size === 0) throw new Error("JSON 文件为空");
+    if (file.size > 10 * 1024 * 1024) throw new Error("JSON 备份不能超过 10 MB");
+    const data = JSON.parse((await file.text()).replace(/^\uFEFF/, ""));
+    const counts = data?.meta || {};
+    if (data?.format !== "st-nav-backup" || !Array.isArray(data.links) || !Array.isArray(data.navigation) || !Array.isArray(data.settings)) {
+      throw new Error("不是有效的 ST Nav JSON 备份文件");
+    }
+    openModal("JSON 恢复", `
+      <div class="restore-summary"><strong>${esc(file.name)}</strong><span>短链接 ${Number(counts.links || data.links.length)} · 导航 ${Number(counts.navigation || data.navigation.length)} · 设置 ${Number(counts.settings || data.settings.length)}</span></div>
+      <div class="import-options"><label>恢复方式<select id="jsonRestoreMode"><option value="merge">合并恢复（推荐）</option><option value="replace">完全覆盖恢复</option></select></label></div>
+      <div class="form-note">合并不会删除现有数据；完全覆盖会清空当前业务数据。覆盖恢复前请确认你已经保留当前备份。</div>
+      <div class="modal-actions"><button type="button" class="btn secondary" id="restoreCancel">取消</button><button type="button" class="btn primary" id="restoreStart">开始恢复</button></div>
+    `);
+    $("#restoreCancel").onclick = closeModal;
+    $("#restoreStart").onclick = async () => {
+      const mode = $("#jsonRestoreMode").value;
+      if (mode === "replace" && !confirm("完全覆盖恢复会删除当前短链接、导航、统计和设置，确定继续吗？")) return;
+      const button = $("#restoreStart");
+      button.disabled = true;
+      try {
+        const result = await api("/api/admin/restore", { method: "POST", body: JSON.stringify({ mode, backup: data }) });
+        closeModal();
+        toast(`JSON 恢复完成：新增/更新短链接 ${Number(result.links || 0)}，导航 ${Number(result.navigation || 0)}`);
+        await loadAll();
+      } catch (error) {
+        toast(`JSON 恢复失败：${error.message}`);
+        button.disabled = false;
+      }
+    };
+  } catch (error) { toast(`JSON 读取失败：${error.message || "文件无效"}`); }
+  finally { event.currentTarget.value = ""; }
+});
 
 function toggleAdminTheme() {
   document.documentElement.classList.toggle("light-admin");
@@ -554,4 +1132,5 @@ function toggleAdminTheme() {
 if (localStorage.getItem("sln_admin_theme") === "light") document.documentElement.classList.add("light-admin");
 $("#adminThemeBtn").textContent = document.documentElement.classList.contains("light-admin") ? "☀" : "☾";
 $("#adminThemeBtn").onclick = toggleAdminTheme;
+initSettingsTabs();
 boot();

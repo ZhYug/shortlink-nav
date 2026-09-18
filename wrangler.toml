@@ -1,9 +1,17 @@
-name = "shortlink-nav-v31"
-compatibility_date = "2026-09-05"
-pages_build_output_dir = "public"
+name = "st-nav"
+pages_build_output_dir = "./public"
+compatibility_date = "2026-09-11"
 
+# D1 database_id is intentionally not stored in this repository.
+# For local/CLI deployment, scripts/deploy.mjs reads D1_DATABASE_ID and
+# generates a temporary Wrangler config before applying migrations/deploying.
 [[d1_databases]]
 binding = "DB"
-database_name = "shortlink-nav"
-database_id = "aef03fc2-42e3-4bee-ade6-170cf445d62c"
-migrations_dir = "migrations"
+database_name = "st-nav"
+migrations_dir = "./migrations"
+
+[observability]
+enabled = true
+
+[vars]
+ST_NAV_VERSION = "1.0.0"

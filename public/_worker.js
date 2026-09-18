@@ -1,12 +1,65 @@
+
+const VERSION = "1.0.0";
+const SESSION_COOKIE = "__Host-stnav_session";
+const SESSION_TTL = 86400;
+const PUBLIC_CACHE_CONTROL = "public, max-age=0, s-maxage=30, stale-while-revalidate=60";
+const databaseReady = new WeakMap();
+const REQUIRED_TABLES = ["links", "link_daily_stats", "navigation", "settings"];
+
+async function ensureDatabase(env) {
+  if (!env.DB) {
+    throw new Error("D1 数据库绑定 DB 不存在，请检查 Cloudflare 部署配置。");
+  }
+
+  let promise = databaseReady.get(env);
+  if (!promise) {
+    promise = (async () => {
+      const result = await env.DB
+        .prepare(`
+          SELECT name
+          FROM sqlite_master
+          WHERE type = 'table'
+            AND name IN (?, ?, ?, ?)
+        `)
+        .bind(...REQUIRED_TABLES)
+        .all();
+
+      const existing = new Set((result.results ?? []).map((row) => row.name));
+      const missing = REQUIRED_TABLES.filter((name) => !existing.has(name));
+
+      if (missing.length) {
+        throw new Error(
+          `D1 数据库尚未初始化，缺少数据表: ${missing.join(", ")}`
+        );
+      }
+    })();
+
+    databaseReady.set(env, promise);
+    promise.catch(() => databaseReady.delete(env));
+  }
+
+  await promise;
+}
+
 const JSON_HEADERS = {
   "content-type": "application/json;charset=UTF-8",
   "cache-control": "no-store",
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "strict-origin-when-cross-origin",
+  "permissions-policy": "camera=(), microphone=(), geolocation=()",
+};
+
+const SECURITY_HEADERS = {
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "strict-origin-when-cross-origin",
+  "permissions-policy": "camera=(), microphone=(), geolocation=()",
+  "x-frame-options": "DENY",
 };
 
 const json = (data, status = 200, headers = {}) =>
   new Response(JSON.stringify(data), {
     status,
-    headers: { ...JSON_HEADERS, ...headers },
+    headers: { ...JSON_HEADERS, ...SECURITY_HEADERS, ...headers },
   });
 
 const now = () => new Date().toISOString();
@@ -31,9 +84,16 @@ const ALLOWED_SETTINGS = [
 
 function randomCode(n = 7) {
   let s = "";
+  const size = b62.length;
+  const limit = Math.floor(0x100000000 / size) * size;
   const values = new Uint32Array(n);
-  crypto.getRandomValues(values);
-  for (let i = 0; i < n; i++) s += b62[values[i] % b62.length];
+  while (s.length < n) {
+    crypto.getRandomValues(values);
+    for (let i = 0; i < values.length && s.length < n; i++) {
+      if (values[i] >= limit) continue;
+      s += b62[values[i] % size];
+    }
+  }
   return s;
 }
 
@@ -43,6 +103,18 @@ function validUrl(value) {
     return u.protocol === "http:" || u.protocol === "https:";
   } catch {
     return false;
+  }
+}
+
+function faviconUrl(value) {
+  try {
+    const hostname = new URL(String(value)).hostname.toLowerCase();
+    if (!hostname) return "";
+    // DuckDuckGo favicon endpoint should be kept in its canonical form.
+    // Do not append cache-busting query parameters such as ?v=timestamp.
+    return `https://icons.duckduckgo.com/ip3/${encodeURIComponent(hostname)}.ico`;
+  } catch {
+    return "";
   }
 }
 
@@ -62,8 +134,8 @@ function base64urlDecode(value) {
   return atob(padded);
 }
 
-function cookie(name, value, maxAge = 86400) {
-  return `${name}=${value}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`;
+function cookie(name, value, maxAge = SESSION_TTL) {
+  return `${name}=${value}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Strict`;
 }
 
 async function hmac(secret, data) {
@@ -83,9 +155,8 @@ async function hmac(secret, data) {
 }
 
 async function sessionToken(secret) {
-  const payload = base64urlEncode(
-    JSON.stringify({ exp: Date.now() + 86400000, iat: Date.now() })
-  );
+  const iat = Date.now();
+  const payload = base64urlEncode(JSON.stringify({ exp: iat + SESSION_TTL * 1000, iat }));
   return `${payload}.${await hmac(secret, payload)}`;
 }
 
@@ -95,16 +166,43 @@ function getCookie(request, name) {
   return match?.[1] || "";
 }
 
+async function safePasswordMatch(input, expected) {
+  const encoder = new TextEncoder();
+  const [left, right] = await Promise.all([
+    crypto.subtle.digest("SHA-256", encoder.encode(String(input))),
+    crypto.subtle.digest("SHA-256", encoder.encode(String(expected))),
+  ]);
+  const a = new Uint8Array(left);
+  const b = new Uint8Array(right);
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
+}
+
+function sessionSecret(env) {
+  return String(env.SESSION_SECRET || env.ADMIN_PASSWORD || "");
+}
+
 async function isAuthed(request, env) {
-  if (!env.SESSION_SECRET) return false;
-  const token = getCookie(request, "sln_session");
+  const secret = sessionSecret(env);
+  if (!secret) return false;
+  const token = getCookie(request, SESSION_COOKIE);
   const [payload, signature] = token.split(".");
   if (!payload || !signature) return false;
   try {
     const data = JSON.parse(base64urlDecode(payload));
     if (!data.exp || data.exp < Date.now()) return false;
-    const expected = await hmac(env.SESSION_SECRET, payload);
-    return expected === signature;
+    const signatureBytes = Uint8Array.from(
+      base64urlDecode(signature),
+      (char) => char.charCodeAt(0)
+    );
+    const key = await crypto.subtle.importKey(
+      "raw", new TextEncoder().encode(secret),
+      { name: "HMAC", hash: "SHA-256" }, false, ["verify"]
+    );
+    return await crypto.subtle.verify(
+      { name: "HMAC" }, key, signatureBytes, new TextEncoder().encode(payload)
+    );
   } catch {
     return false;
   }
@@ -121,44 +219,381 @@ async function requireAuth(request, env) {
   return null;
 }
 
+class RequestError extends Error {
+  constructor(message, status = 400) {
+    super(message);
+    this.status = status;
+  }
+}
+
+const MAX_JSON_BODY_BYTES = 1024 * 1024;
+const MAX_RESTORE_BODY_BYTES = 10 * 1024 * 1024;
+
+async function bodyWithLimit(request, maxBytes = MAX_JSON_BODY_BYTES) {
+  const length = Number(request.headers.get("content-length"));
+  if (Number.isFinite(length) && length > maxBytes) {
+    throw new RequestError("请求体过大", 413);
+  }
+  const text = await request.text();
+  if (new TextEncoder().encode(text).byteLength > maxBytes) {
+    throw new RequestError("请求体过大", 413);
+  }
+  if (!text.trim()) return {};
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new RequestError("请求 JSON 格式无效", 400);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new RequestError("请求 JSON 必须是对象", 400);
+  }
+  return parsed;
+}
+
 async function body(request) {
-  return await request.json().catch(() => ({}));
+  return bodyWithLimit(request, MAX_JSON_BODY_BYTES);
 }
 
 function routeParts(path) {
   return path.split("/").filter(Boolean);
 }
 
-async function uniqueCode(env) {
-  for (let i = 0; i < 12; i++) {
-    const code = randomCode();
-    const exists = await env.DB.prepare("SELECT id FROM links WHERE code = ?")
-      .bind(code)
-      .first();
-    if (!exists) return code;
+const PUBLIC_CACHE_PATH = "/api/public/bootstrap";
+function publicCacheKey(request) {
+  const url = new URL(request.url);
+  url.pathname = PUBLIC_CACHE_PATH;
+  url.search = "";
+  return new Request(url.toString(), { method: "GET" });
+}
+
+function redirectCacheKey(request, code) {
+  const url = new URL(request.url);
+  url.pathname = `/__sln_redirect_cache/${encodeURIComponent(code)}`;
+  url.search = "";
+  return new Request(url.toString(), { method: "GET" });
+}
+
+function cacheAvailable() {
+  return typeof caches !== "undefined" && !!caches.default;
+}
+
+function waitUntil(ctx, promise) {
+  if (!promise) return;
+  if (ctx?.waitUntil) {
+    ctx.waitUntil(Promise.resolve(promise).catch((error) => console.error(error)));
+  } else if (promise?.catch) {
+    promise.catch((error) => console.error(error));
   }
-  throw new Error("无法生成唯一短码，请稍后重试");
+}
+
+function invalidateRedirectCache(request, ctx, code) {
+  if (!code || !cacheAvailable()) return;
+  waitUntil(ctx, caches.default.delete(redirectCacheKey(request, code)));
+}
+
+function invalidatePublicCache(request, ctx) {
+  if (!cacheAvailable()) return;
+  const key = publicCacheKey(request);
+  waitUntil(ctx, caches.default.delete(key));
+}
+
+async function getPublicBootstrap(env) {
+  const results = await env.DB.batch([
+    env.DB.prepare(`SELECT navigation.id,navigation.title,navigation.description,navigation.url,
+                           navigation.icon,navigation.category,navigation.sort_order,navigation.enabled,
+                           navigation.link_id,links.code,links.url AS link_url
+                    FROM navigation
+                    LEFT JOIN links ON navigation.link_id=links.id
+                    WHERE navigation.enabled=1 AND (navigation.link_id IS NULL OR links.enabled=1)
+                    ORDER BY navigation.sort_order,navigation.id`),
+    env.DB.prepare("SELECT key,value FROM settings"),
+  ]);
+  return { items: results[0].results, settings: Object.fromEntries(results[1].results.map((row) => [row.key, row.value])) };
+}
+
+function publicPayload(data, request) {
+  const origin = new URL(request.url).origin;
+  return {
+    items: data.items.map((item) => ({
+      ...item,
+      target_url: item.link_url || item.url,
+      ...(item.code ? { short_url: `${origin}/${item.code}` } : {}),
+    })),
+    settings: data.settings,
+  };
+}
+
+function cachePut(cache, key, response, ctx) {
+  try {
+    const put = cache.put(key, response.clone());
+    if (ctx?.waitUntil) ctx.waitUntil(put);
+    else put.catch((error) => console.error("Cache write failed", error));
+  } catch (error) {
+    console.error("Cache write failed", error);
+  }
+}
+
+async function cachedPublicBootstrap(request, env, ctx) {
+  if (!cacheAvailable()) return json(publicPayload(await getPublicBootstrap(env), request));
+
+  const cache = caches.default;
+  const key = publicCacheKey(request);
+  const cached = await cache.match(key);
+  if (cached) return cached;
+
+  const response = json(publicPayload(await getPublicBootstrap(env), request), 200, {
+    "cache-control": PUBLIC_CACHE_CONTROL,
+  });
+  cachePut(cache, key, response, ctx);
+  return response;
+}
+
+const loginAttempts = new Map();
+const LOGIN_WINDOW_MS = 5 * 60 * 1000;
+const LOGIN_MAX_FAILURES = 5;
+
+function clientKey(request) {
+  return request.headers.get("CF-Connecting-IP") || request.headers.get("X-Forwarded-For")?.split(",")[0]?.trim() || "unknown";
+}
+function checkLoginRateLimit(request) {
+  const nowMs = Date.now();
+  const key = clientKey(request);
+  const row = loginAttempts.get(key);
+  if (!row || row.resetAt <= nowMs) return { ok: true, retryAfter: 0 };
+  return { ok: row.failures < LOGIN_MAX_FAILURES, retryAfter: Math.max(1, Math.ceil((row.resetAt - nowMs) / 1000)) };
+}
+function recordLoginFailure(request) {
+  const nowMs = Date.now();
+  const key = clientKey(request);
+  if (loginAttempts.size > 1000) {
+    for (const [storedKey, stored] of loginAttempts) {
+      if (stored.resetAt <= nowMs || loginAttempts.size > 900) loginAttempts.delete(storedKey);
+      if (loginAttempts.size <= 900) break;
+    }
+  }
+  const row = loginAttempts.get(key);
+  if (!row || row.resetAt <= nowMs) loginAttempts.set(key, { failures: 1, resetAt: nowMs + LOGIN_WINDOW_MS });
+  else row.failures += 1;
+}
+function clearLoginFailures(request) { loginAttempts.delete(clientKey(request)); }
+
+
+const BACKUP_FORMAT = "st-nav-backup";
+const BACKUP_VERSION = 1;
+const MAX_RESTORE_ROWS = 10000;
+
+function boolValue(value, fallback = true) {
+  if (value === undefined || value === null || value === "") return fallback ? 1 : 0;
+  if (value === true || value === 1 || value === "1" || String(value).toLowerCase() === "true") return 1;
+  return 0;
+}
+
+function backupString(value, max) {
+  return clean(value, max);
+}
+
+function validateBackup(data) {
+  if (!data || data.format !== BACKUP_FORMAT) throw new RequestError("不是有效的 ST Nav JSON 备份文件", 400);
+  if (!Number.isInteger(Number(data.version)) || Number(data.version) < 1) throw new RequestError("备份版本无效", 400);
+  for (const key of ["links", "navigation", "settings", "link_daily_stats"]) {
+    if (!Array.isArray(data[key])) throw new RequestError(`备份缺少 ${key} 数据`, 400);
+    if (data[key].length > MAX_RESTORE_ROWS * (key === "link_daily_stats" ? 5 : 1)) throw new RequestError(`${key} 数据量过大`, 413);
+  }
+}
+
+async function makeBackup(env) {
+  const results = await env.DB.batch([
+    env.DB.prepare(`SELECT id,code,url,title,description,category,enabled,favorite,clicks,last_clicked_at,created_at,updated_at FROM links ORDER BY id`),
+    env.DB.prepare(`SELECT id,title,description,url,icon,category,sort_order,enabled,favorite,link_id,created_at,updated_at FROM navigation ORDER BY sort_order,id`),
+    env.DB.prepare(`SELECT key,value FROM settings ORDER BY key`),
+    env.DB.prepare(`SELECT link_id,day,clicks FROM link_daily_stats ORDER BY day,link_id`),
+  ]);
+  return {
+    format: BACKUP_FORMAT,
+    version: BACKUP_VERSION,
+    app_version: VERSION,
+    exported_at: now(),
+    meta: {
+      links: results[0].results.length,
+      navigation: results[1].results.length,
+      settings: results[2].results.length,
+      link_daily_stats: results[3].results.length,
+    },
+    links: results[0].results,
+    navigation: results[1].results,
+    settings: results[2].results,
+    link_daily_stats: results[3].results,
+  };
+}
+
+function validBackupLink(item) {
+  return item && CODE_RE.test(String(item.code || "")) && !RESERVED_CODES.has(String(item.code).toLowerCase()) && validUrl(item.url);
+}
+
+async function restoreBackup(env, data, mode) {
+  validateBackup(data);
+  if (!["merge", "replace"].includes(mode)) throw new RequestError("恢复方式无效", 400);
+
+  const links = data.links;
+  const navigation = data.navigation;
+  const settings = data.settings;
+  const stats = data.link_daily_stats;
+  const linkMap = new Map();
+  let linksAffected = 0;
+  let navAffected = 0;
+  let statsAffected = 0;
+
+  if (mode === "replace") {
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM link_daily_stats"),
+      env.DB.prepare("DELETE FROM navigation"),
+      env.DB.prepare("DELETE FROM links"),
+      env.DB.prepare("DELETE FROM settings"),
+    ]);
+  }
+
+  // Restore links first so navigation and daily stats can safely reference them.
+  for (let i = 0; i < links.length; i += 50) {
+    const chunk = links.slice(i, i + 50);
+    const statements = [];
+    for (const item of chunk) {
+      if (!validBackupLink(item)) throw new RequestError(`备份中的短链接无效：${clean(item?.code, 80)}`, 400);
+      const code = clean(item.code, 64);
+      const url = clean(item.url, 2000);
+      const title = clean(item.title, 200);
+      const description = clean(item.description, 500);
+      const category = clean(item.category, 80);
+      const enabled = boolValue(item.enabled, true);
+      const favorite = boolValue(item.favorite, false);
+      const clicks = Math.max(0, Number(item.clicks) || 0);
+      const lastClicked = clean(item.last_clicked_at, 80);
+      const createdAt = clean(item.created_at, 80) || now();
+      const updatedAt = clean(item.updated_at, 80) || now();
+      if (mode === "replace") {
+        const id = Number(item.id);
+        if (!Number.isInteger(id) || id <= 0) throw new RequestError(`备份短链接 ID 无效：${code}`, 400);
+        statements.push(env.DB.prepare(`INSERT INTO links(id,code,url,title,description,category,enabled,favorite,clicks,last_clicked_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).bind(id,code,url,title,description,category,enabled,favorite,clicks,lastClicked||null,createdAt,updatedAt));
+        linkMap.set(Number(item.id), id);
+      } else {
+        const existing = await env.DB.prepare("SELECT id FROM links WHERE code=?").bind(code).first();
+        if (existing) {
+          const id = Number(existing.id);
+          linkMap.set(Number(item.id), id);
+          statements.push(env.DB.prepare(`UPDATE links SET url=?,title=?,description=?,category=?,enabled=?,favorite=?,clicks=?,last_clicked_at=?,updated_at=? WHERE id=?`).bind(url,title,description,category,enabled,favorite,clicks,lastClicked||null,updatedAt,id));
+        } else {
+          statements.push(env.DB.prepare(`INSERT INTO links(code,url,title,description,category,enabled,favorite,clicks,last_clicked_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).bind(code,url,title,description,category,enabled,favorite,clicks,lastClicked||null,createdAt,updatedAt));
+          // D1 does not expose the inserted id in a portable way across batches; map after this chunk below.
+        }
+      }
+    }
+    if (statements.length) await env.DB.batch(statements);
+    if (mode === "merge") {
+      for (const item of chunk) {
+        if (!linkMap.has(Number(item.id))) {
+          const row = await env.DB.prepare("SELECT id FROM links WHERE code=?").bind(clean(item.code,64)).first();
+          if (row) linkMap.set(Number(item.id), Number(row.id));
+        }
+      }
+    }
+    linksAffected += chunk.length;
+  }
+
+  if (mode === "merge") {
+    // Re-read the map for safety after all inserts/updates.
+    for (const item of links) {
+      if (!linkMap.has(Number(item.id))) {
+        const row = await env.DB.prepare("SELECT id FROM links WHERE code=?").bind(clean(item.code,64)).first();
+        if (row) linkMap.set(Number(item.id), Number(row.id));
+      }
+    }
+  }
+
+  // Navigation: linked entries are keyed by their link_id; manual entries use id when replacing,
+  // and a title+URL match when merging to avoid creating duplicates on repeated restores.
+  for (let i = 0; i < navigation.length; i += 50) {
+    const chunk = navigation.slice(i, i + 50);
+    const statements = [];
+    for (const item of chunk) {
+      const title = clean(item.title, 120);
+      const description = clean(item.description, 500);
+      const url = clean(item.url, 2000);
+      const icon = clean(item.icon, 1000);
+      const category = clean(item.category, 80);
+      const sortOrder = Number.isFinite(Number(item.sort_order)) ? Number(item.sort_order) : 0;
+      const enabled = boolValue(item.enabled, true);
+      const favorite = boolValue(item.favorite, false);
+      if (!title || !validUrl(url)) throw new RequestError(`备份中的导航无效：${title || url}`, 400);
+      const mappedLinkId = item.link_id ? linkMap.get(Number(item.link_id)) : null;
+      if (item.link_id && !mappedLinkId) throw new RequestError(`导航关联的短链接不存在：${item.link_id}`, 400);
+
+      if (mode === "replace") {
+        const id = Number(item.id);
+        if (!Number.isInteger(id) || id <= 0) throw new RequestError(`备份导航 ID 无效：${title}`, 400);
+        statements.push(env.DB.prepare(`INSERT INTO navigation(id,title,description,url,icon,category,sort_order,enabled,favorite,link_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).bind(id,title,description,url,icon,category,sortOrder,enabled,favorite,mappedLinkId||null,clean(item.created_at,80)||now(),clean(item.updated_at,80)||now()));
+      } else if (mappedLinkId) {
+        const existing = await env.DB.prepare("SELECT id FROM navigation WHERE link_id=? LIMIT 1").bind(mappedLinkId).first();
+        if (existing) statements.push(env.DB.prepare(`UPDATE navigation SET title=?,description=?,url=?,icon=?,category=?,sort_order=?,enabled=?,favorite=?,updated_at=? WHERE id=?`).bind(title,description,url,icon,category,sortOrder,enabled,favorite,clean(item.updated_at,80)||now(),Number(existing.id)));
+        else statements.push(env.DB.prepare(`INSERT INTO navigation(title,description,url,icon,category,sort_order,enabled,favorite,link_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).bind(title,description,url,icon,category,sortOrder,enabled,favorite,mappedLinkId,clean(item.created_at,80)||now(),clean(item.updated_at,80)||now()));
+      } else {
+        const existing = await env.DB.prepare("SELECT id FROM navigation WHERE link_id IS NULL AND title=? AND url=? LIMIT 1").bind(title,url).first();
+        if (existing) statements.push(env.DB.prepare(`UPDATE navigation SET description=?,icon=?,category=?,sort_order=?,enabled=?,favorite=?,updated_at=? WHERE id=?`).bind(description,icon,category,sortOrder,enabled,favorite,clean(item.updated_at,80)||now(),Number(existing.id)));
+        else statements.push(env.DB.prepare(`INSERT INTO navigation(title,description,url,icon,category,sort_order,enabled,favorite,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`).bind(title,description,url,icon,category,sortOrder,enabled,favorite,clean(item.created_at,80)||now(),clean(item.updated_at,80)||now()));
+      }
+    }
+    if (statements.length) await env.DB.batch(statements);
+    navAffected += chunk.length;
+  }
+
+  for (let i = 0; i < settings.length; i += 50) {
+    const statements = settings.slice(i, i + 50).map((item) => {
+      const key = clean(item?.key, 100);
+      if (!key || !ALLOWED_SETTINGS.includes(key)) throw new RequestError(`备份包含不允许的设置项：${key}`, 400);
+      return env.DB.prepare(`INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`).bind(key, clean(item.value, 500));
+    });
+    if (statements.length) await env.DB.batch(statements);
+  }
+
+  for (let i = 0; i < stats.length; i += 50) {
+    const statements = stats.slice(i, i + 50).map((item) => {
+      const linkId = linkMap.get(Number(item.link_id));
+      const day = clean(item.day, 10);
+      const clicks = Math.max(0, Number(item.clicks) || 0);
+      if (!linkId || !/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new RequestError("备份中的点击统计无效", 400);
+      return env.DB.prepare(`INSERT INTO link_daily_stats(link_id,day,clicks) VALUES(?,?,?) ON CONFLICT(link_id,day) DO UPDATE SET clicks=excluded.clicks`).bind(linkId,day,clicks);
+    });
+    if (statements.length) await env.DB.batch(statements);
+    statsAffected += statements.length;
+  }
+
+  return { links: linksAffected, navigation: navAffected, settings: settings.length, stats: statsAffected };
 }
 
 async function handleApi(request, env, ctx, parts) {
   const method = request.method.toUpperCase();
   const path = "/" + parts.join("/");
 
+  const noDatabase = new Set(["/api/auth/login", "/api/auth/logout", "/api/auth/me", "/api/health"]);
+  if (!noDatabase.has(path)) await ensureDatabase(env);
+
   if (path === "/api/auth/login" && method === "POST") {
     if (!sameOrigin(request)) return json({ error: "非法来源" }, 403);
-    if (!env.ADMIN_PASSWORD || !env.SESSION_SECRET) {
-      return json({ error: "服务器尚未配置管理员密码或 SESSION_SECRET" }, 500);
+    if (!env.ADMIN_PASSWORD) {
+      return json({ error: "服务器尚未配置管理员密码" }, 500);
     }
+    if (env.SESSION_SECRET && String(env.SESSION_SECRET).length < 32) {
+      return json({ error: "SESSION_SECRET 至少需要 32 个字符" }, 500);
+    }
+    const rate = checkLoginRateLimit(request);
+    if (!rate.ok) return json({ error: "登录尝试过于频繁，请稍后再试" }, 429, { "retry-after": String(rate.retryAfter) });
     const data = await body(request);
-    if (String(data.password ?? "") !== String(env.ADMIN_PASSWORD)) {
+    if (!(await safePasswordMatch(data.password ?? "", env.ADMIN_PASSWORD))) {
+      recordLoginFailure(request);
       return json({ error: "密码错误" }, 401);
     }
-    const token = await sessionToken(env.SESSION_SECRET);
-    return json(
-      { ok: true },
-      200,
-      { "Set-Cookie": cookie("sln_session", token) }
-    );
+    clearLoginFailures(request);
+    const token = await sessionToken(sessionSecret(env));
+    return json({ ok: true }, 200, { "Set-Cookie": cookie(SESSION_COOKIE, token) });
   }
 
   if (path === "/api/auth/logout" && method === "POST") {
@@ -166,7 +601,7 @@ async function handleApi(request, env, ctx, parts) {
     return json(
       { ok: true },
       200,
-      { "Set-Cookie": cookie("sln_session", "", 0) }
+      { "Set-Cookie": cookie(SESSION_COOKIE, "", 0) }
     );
   }
 
@@ -174,116 +609,363 @@ async function handleApi(request, env, ctx, parts) {
     return json({ authenticated: await isAuthed(request, env) });
   }
 
-  if (path === "/api/public/navigation" && method === "GET") {
-  const result = await env.DB.prepare(
-    `SELECT
-       navigation.*,
-       links.code
-     FROM navigation
-     LEFT JOIN links ON navigation.link_id = links.id
-     WHERE navigation.enabled=1
-     ORDER BY navigation.sort_order,navigation.id`
-  ).all();
+  if (path === "/api/health" && method === "GET") {
+    return json({ ok: true, version: VERSION, database: Boolean(env.DB), session_secret: Boolean(env.SESSION_SECRET) });
+  }
 
-  const origin = new URL(request.url).origin;
-
-  const items = result.results.map((item) => {
-    if (item.code) {
-      item.url = origin + "/" + item.code;
-    }
-    return item;
-  });
-
-  return json({ items });
-}
-
-  if (path === "/api/public/settings" && method === "GET") {
-    const result = await env.DB.prepare("SELECT key,value FROM settings").all();
-    return json({
-      settings: Object.fromEntries(result.results.map((x) => [x.key, x.value])),
-    });
+  if (path === "/api/public/bootstrap" && method === "GET") {
+    return cachedPublicBootstrap(request, env, ctx);
   }
 
   const auth = await requireAuth(request, env);
   if (auth) return auth;
 
-  if (path === "/api/admin/dashboard" && method === "GET") {
-    const stats = await env.DB.prepare(
-      `SELECT
+  if (path === "/api/admin/bootstrap" && method === "GET") {
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+    const startDay = new Date(today);
+    startDay.setUTCDate(today.getUTCDate() - 13);
+    const start = startDay.toISOString().slice(0, 10);
+
+    const results = await env.DB.batch([
+      env.DB.prepare(`SELECT
         (SELECT COUNT(*) FROM links) links,
         (SELECT COALESCE(SUM(clicks),0) FROM links) clicks,
         (SELECT COUNT(*) FROM navigation) navigation,
-        (SELECT COUNT(*) FROM link_visits WHERE visited_at >= datetime('now','-13 day')) recentClicks`
-    ).first();
+        (SELECT COALESCE(SUM(clicks),0) FROM link_daily_stats WHERE day>=?) recentClicks` ).bind(start),
+      env.DB.prepare("SELECT id,code,url,title,clicks FROM links ORDER BY clicks DESC,id DESC LIMIT 8"),
+      env.DB.prepare(`SELECT day, COALESCE(SUM(clicks),0) clicks
+       FROM link_daily_stats
+       WHERE day>=?
+       GROUP BY day
+       ORDER BY day`).bind(start),
+      env.DB.prepare("SELECT id,code,url,title,description,category,enabled,clicks,last_clicked_at,created_at,updated_at,favorite FROM links ORDER BY created_at DESC,id DESC"),
+      env.DB.prepare(`SELECT
+        navigation.id,navigation.title,navigation.description,navigation.url,navigation.icon,
+        navigation.category,navigation.sort_order,navigation.enabled,navigation.favorite,navigation.created_at,
+        navigation.updated_at,navigation.link_id,links.code,links.url AS link_url,links.title AS link_title,
+        links.description AS link_description,links.category AS link_category,
+        links.enabled AS link_enabled
+       FROM navigation
+       LEFT JOIN links ON navigation.link_id = links.id
+       ORDER BY navigation.sort_order,navigation.id`),
+      env.DB.prepare("SELECT key,value FROM settings"),
+    ]);
 
-    const top = await env.DB.prepare(
-      "SELECT id,code,url,title,clicks FROM links ORDER BY clicks DESC,id DESC LIMIT 8"
-    ).all();
-
-    const trend = await env.DB.prepare(
-      `WITH RECURSIVE dates(d) AS (
-        SELECT date('now','-13 day')
-        UNION ALL
-        SELECT date(d,'+1 day') FROM dates WHERE d < date('now')
-      )
-      SELECT dates.d day, COALESCE(COUNT(link_visits.id),0) clicks
-      FROM dates
-      LEFT JOIN link_visits ON date(link_visits.visited_at)=dates.d
-      GROUP BY dates.d ORDER BY dates.d`
-    ).all();
-
-    return json({ stats, topLinks: top.results, trend: trend.results });
-  }
-
-  if (path === "/api/admin/links" && method === "GET") {
-    const result = await env.DB.prepare(
-      "SELECT * FROM links ORDER BY created_at DESC,id DESC"
-    ).all();
     const origin = new URL(request.url).origin;
-    const items = result.results.map((item) => ({
+    const links = results[3].results.map((item) => ({
       ...item,
       short_url: item.code ? `${origin}/${item.code}` : "",
     }));
+    const nav = results[4].results.map((item) => ({
+      ...item,
+      short_url: item.code ? `${origin}/${item.code}` : "",
+      url: item.code ? `${origin}/${item.code}` : item.url,
+    }));
+    const trendMap = new Map(results[2].results.map((row) => [row.day, Number(row.clicks) || 0]));
+    const trend = [];
+    for (let offset = 13; offset >= 0; offset--) {
+      const day = new Date(today);
+      day.setUTCDate(today.getUTCDate() - offset);
+      const key = day.toISOString().slice(0, 10);
+      trend.push({ day: key, clicks: trendMap.get(key) || 0 });
+    }
 
-    return json({ items });
+    return json({
+      dashboard: { stats: results[0].results[0], topLinks: results[1].results, trend },
+      links,
+      navigation: nav,
+      settings: Object.fromEntries(results[5].results.map((x) => [x.key, x.value])),
+    });
   }
 
-  if (path === "/api/admin/links" && method === "POST") {
+  
+  if (path === "/api/admin/backup" && method === "GET") {
+    const backup = await makeBackup(env);
+    return json(backup, 200, { "cache-control": "no-store" });
+  }
+
+  if (path === "/api/admin/restore" && method === "POST") {
+    const data = await bodyWithLimit(request, MAX_RESTORE_BODY_BYTES);
+    const result = await restoreBackup(env, data.backup, data.mode);
+    invalidatePublicCache(request, ctx);
+    return json({ ok: true, ...result });
+  }
+
+  if (path === "/api/admin/links/import" && method === "POST") {
+    const data = await body(request);
+    const rows = Array.isArray(data.rows) ? data.rows : [];
+    const mode = ["skip", "update", "rename"].includes(data.mode) ? data.mode : "skip";
+    if (!rows.length) return json({ imported: 0, skipped: 0, failed: 0 });
+    if (rows.length > 100) return json({ error: "单次 CSV 导入最多 100 条，请分批提交" }, 413);
+    let imported = 0, skipped = 0, failed = 0;
+    for (const item of rows) {
+      try {
+        let code = clean(item.code, 64);
+        const url = clean(item.url, 2000);
+        if (!validUrl(url)) throw new RequestError("URL 必须是 http/https", 400);
+        if (code && (!CODE_RE.test(code) || RESERVED_CODES.has(code.toLowerCase()))) throw new RequestError("短码格式无效或为保留字", 400);
+        const title = clean(item.title, 200);
+        const description = clean(item.description, 500);
+        const category = clean(item.category, 80);
+        const enabled = boolValue(item.enabled, true);
+        const favorite = boolValue(item.favorite, false);
+        let existing = code ? await env.DB.prepare("SELECT id FROM links WHERE code=?").bind(code).first() : null;
+        if (existing) {
+          if (mode === "skip") { skipped++; continue; }
+          if (mode === "update") {
+            await env.DB.prepare(`UPDATE links SET url=?,title=?,description=?,category=?,enabled=?,favorite=?,updated_at=? WHERE id=?`).bind(url,title,description,category,enabled,favorite,now(),Number(existing.id)).run();
+            await env.DB.prepare(`UPDATE navigation SET title=?,description=?,category=?,icon=?,enabled=?,updated_at=? WHERE link_id=?`).bind(title,description,category,faviconUrl(url),enabled,now(),Number(existing.id)).run();
+            imported++; continue;
+          }
+          if (mode === "rename") code = "";
+        }
+        if (!code) {
+          let created = false;
+          for (let attempt = 0; attempt < 5 && !created; attempt++) {
+            const candidate = randomCode();
+            try {
+              await env.DB.prepare(`INSERT INTO links(code,url,title,description,category,enabled,favorite,updated_at) VALUES(?,?,?,?,?,?,?,?)`).bind(candidate,url,title,description,category,enabled,favorite,now()).run();
+              created = true;
+            } catch (error) {
+              if (!String(error?.message || "").toLowerCase().includes("unique")) throw error;
+            }
+          }
+          if (!created) throw new RequestError("无法生成唯一短码", 503);
+        } else {
+          await env.DB.prepare(`INSERT INTO links(code,url,title,description,category,enabled,favorite,updated_at) VALUES(?,?,?,?,?,?,?,?)`).bind(code,url,title,description,category,enabled,favorite,now()).run();
+        }
+        imported++;
+      } catch (error) {
+        failed++;
+        if (error instanceof RequestError && error.status >= 500) throw error;
+      }
+    }
+    invalidatePublicCache(request, ctx);
+    return json({ ok: true, imported, skipped, failed });
+  }
+
+  if (path === "/api/admin/links/bulk" && method === "POST") {
+    const data = await body(request);
+    const allowedActions = new Set(["add_navigation", "remove_navigation", "enable", "disable", "delete"]);
+    const action = String(data.action || "");
+    if (!allowedActions.has(action)) {
+      return json({ error: "批量操作类型无效" }, 400);
+    }
+
+    if (!Array.isArray(data.ids) || !data.ids.length) {
+      return json({ error: "请至少选择一个短链接" }, 400);
+    }
+
+    const ids = [...new Set(data.ids.map(Number))];
+    if (ids.some((id) => !Number.isInteger(id) || id <= 0)) {
+      return json({ error: "短链接 ID 无效" }, 400);
+    }
+    if (ids.length > 2000) {
+      return json({ error: "单次最多处理 2000 个短链接，请分批操作" }, 400);
+    }
+
+    const placeholders = (count) => Array.from({ length: count }, () => "?").join(",");
+    const chunks = (list, size) => {
+      const result = [];
+      for (let i = 0; i < list.length; i += size) result.push(list.slice(i, i + size));
+      return result;
+    };
+
+    if (action === "remove_navigation") {
+      let affected = 0;
+      for (const chunk of chunks(ids, 90)) {
+        const marks = placeholders(chunk.length);
+        const result = await env.DB.prepare(
+          `DELETE FROM navigation WHERE link_id IN (${marks})`
+        ).bind(...chunk).run();
+        affected += Number(result.meta?.changes || 0);
+      }
+      invalidatePublicCache(request, ctx);
+      return json({ ok: true, affected, failed: Math.max(0, ids.length - affected) });
+    }
+
+    if (action === "add_navigation") {
+      // One INSERT...SELECT keeps the operation efficient for large selections and
+      // the UNIQUE(link_id) index makes repeated "add to navigation" idempotent.
+      let affected = 0;
+      for (const chunk of chunks(ids, 90)) {
+        const marks = placeholders(chunk.length);
+        const origin = new URL(request.url).origin;
+        // Fetch selected links once, then insert them in bounded D1 batches.
+        const selected = await env.DB.prepare(
+          `SELECT id,code,title,description,url,category,enabled,favorite
+           FROM links WHERE id IN (${marks})`
+        ).bind(...chunk).all();
+
+        if (!selected.results.length) continue;
+        const existing = await env.DB.prepare(
+          `SELECT link_id FROM navigation WHERE link_id IN (${marks})`
+        ).bind(...chunk).all();
+        const existingIds = new Set(existing.results.map((row) => Number(row.link_id)));
+        const pending = selected.results.filter((row) => !existingIds.has(Number(row.id)));
+        if (!pending.length) continue;
+
+        for (const pendingBatch of chunks(pending, 90)) {
+          const maxResult = await env.DB.prepare(
+            "SELECT COALESCE(MAX(sort_order), -1) AS max_order FROM navigation"
+          ).first();
+          const baseOrder = Number(maxResult?.max_order ?? -1);
+          const statements = pendingBatch.map((link, index) =>
+            env.DB.prepare(
+              `INSERT INTO navigation
+               (link_id,title,description,url,icon,category,sort_order,enabled,favorite,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?)`
+            ).bind(
+              Number(link.id),
+              clean(link.title, 120) || clean(link.code, 120),
+              clean(link.description, 500),
+              `${origin}/${link.code}`,
+              faviconUrl(link.url),
+              clean(link.category, 80),
+              baseOrder + index + 1,
+              Number(link.enabled) ? 1 : 0,
+              Number(link.favorite) ? 1 : 0,
+              now()
+            )
+          );
+          const results = await env.DB.batch(statements);
+          affected += results.filter((result) => Number(result.meta?.changes || 0) > 0).length;
+        }
+      }
+      invalidatePublicCache(request, ctx);
+      return json({ ok: true, affected, failed: ids.length - affected });
+    }
+
+    let affected = 0;
+    const deletedCodes = [];
+    for (const chunk of chunks(ids, 90)) {
+      const marks = placeholders(chunk.length);
+      const timestamp = now();
+
+      if (action === "delete") {
+        const rows = await env.DB.prepare(
+          `SELECT code FROM links WHERE id IN (${marks})`
+        ).bind(...chunk).all();
+        deletedCodes.push(...rows.results.map((row) => row.code));
+        const result = await env.DB.prepare(
+          `DELETE FROM links WHERE id IN (${marks})`
+        ).bind(...chunk).run();
+        affected += Number(result.meta?.changes || 0);
+        continue;
+      }
+
+      const enabled = action === "enable" ? 1 : 0;
+      const results = await env.DB.batch([
+        env.DB.prepare(
+          `UPDATE links SET enabled=?,updated_at=? WHERE id IN (${marks})`
+        ).bind(enabled, timestamp, ...chunk),
+        env.DB.prepare(
+          `UPDATE navigation SET enabled=?,updated_at=? WHERE link_id IN (${marks})`
+        ).bind(enabled, timestamp, ...chunk),
+      ]);
+      affected += Number(results[0]?.meta?.changes || 0);
+    }
+
+    invalidatePublicCache(request, ctx);
+    if (action === "delete") {
+      for (const code of deletedCodes) invalidateRedirectCache(request, ctx, code);
+    }
+    return json({ ok: true, affected, failed: ids.length - affected });
+  }
+
+  if (path === "/api/admin/links/check-code" && method === "GET") {
+    const url = new URL(request.url);
+    const code = clean(url.searchParams.get("code"), 64);
+    const excludeIdRaw = url.searchParams.get("exclude_id");
+    const excludeId = excludeIdRaw && /^\d+$/.test(excludeIdRaw) ? Number(excludeIdRaw) : null;
+
+    if (!code) return json({ available: true, message: "留空将自动生成" });
+    if (!CODE_RE.test(code)) {
+      return json({ available: false, reason: "invalid", message: "格式：2-64 位字母、数字、_、-" });
+    }
+    if (RESERVED_CODES.has(code.toLowerCase())) {
+      return json({ available: false, reason: "reserved", message: "该短码为系统保留字" });
+    }
+
+    const existing = await env.DB.prepare("SELECT id FROM links WHERE code=? LIMIT 1").bind(code).first();
+    const available = !existing || (excludeId !== null && Number(existing.id) === excludeId);
+    return json({ available, reason: available ? "available" : "exists", message: available ? "短码可用" : "短码已存在" });
+  }
+
+if (path === "/api/admin/links" && method === "POST") {
     const data = await body(request);
     const url = clean(data.url, 2000);
     if (!validUrl(url)) return json({ error: "URL 必须是 http/https" }, 400);
 
-    const code = clean(data.code, 64) || (await uniqueCode(env));
-    if (!CODE_RE.test(code)) {
+    let code = clean(data.code, 64);
+    const autoCode = !code;
+    if (!autoCode && !CODE_RE.test(code)) {
       return json({ error: "短码格式不合法：仅允许 2-64 位字母、数字、_、-" }, 400);
     }
-    if (RESERVED_CODES.has(code.toLowerCase())) {
+    if (!autoCode && RESERVED_CODES.has(code.toLowerCase())) {
       return json({ error: `短码 ${code} 为系统保留字，请换一个` }, 400);
     }
 
-    try {
-      await env.DB.prepare(
-        `INSERT INTO links(code,url,title,description,category,enabled,updated_at)
-         VALUES(?,?,?,?,?,?,?)`
-      )
-        .bind(
-          code,
-          url,
-          clean(data.title, 200),
-          clean(data.description, 500),
-          clean(data.category, 80),
-          data.enabled === false ? 0 : 1,
-          now()
-        )
-        .run();
-    } catch (error) {
-      if (String(error?.message || "").toLowerCase().includes("unique")) {
-        return json({ error: "短码已存在" }, 409);
-      }
-      throw error;
-    }
+    const insert = () => env.DB.prepare(
+      `INSERT INTO links(code,url,title,description,category,enabled,favorite,updated_at)
+       VALUES(?,?,?,?,?,?,?,?)`
+    ).bind(
+      code,
+      url,
+      clean(data.title, 200),
+      clean(data.description, 500),
+      clean(data.category, 80),
+      data.enabled === false ? 0 : 1,
+      boolValue(data.favorite, false),
+      now()
+    ).run();
 
-    return json({ ok: true, code });
+    for (let attempt = 0; attempt < (autoCode ? 5 : 1); attempt++) {
+      if (autoCode) code = randomCode();
+      try {
+        await insert();
+        invalidatePublicCache(request, ctx);
+        invalidateRedirectCache(request, ctx, code);
+        return json({ ok: true, code });
+      } catch (error) {
+        if (String(error?.message || "").toLowerCase().includes("unique")) {
+          if (autoCode) continue;
+          return json({ error: "短码已存在" }, 409);
+        }
+        throw error;
+      }
+    }
+    return json({ error: "无法生成唯一短码，请稍后重试" }, 503);
+  }
+
+  const favoriteMatch = path.match(/^\/api\/admin\/links\/(\d+)\/favorite$/);
+  if (favoriteMatch && method === "PATCH") {
+    const id = Number(favoriteMatch[1]);
+    const data = await body(request);
+    const favorite = boolValue(data.favorite, false);
+    const timestamp = now();
+    const results = await env.DB.batch([
+      env.DB.prepare("UPDATE links SET favorite=?,updated_at=? WHERE id=?").bind(favorite, timestamp, id),
+      env.DB.prepare("UPDATE navigation SET favorite=?,updated_at=? WHERE link_id=?").bind(favorite, timestamp, id),
+    ]);
+    if (!results[0]?.meta?.changes) return json({ error: "短链接不存在" }, 404);
+    return json({ ok: true, favorite });
+  }
+
+  const linkStatusMatch = path.match(/^\/api\/admin\/links\/(\d+)\/status$/);
+  if (linkStatusMatch && method === "PATCH") {
+    const id = Number(linkStatusMatch[1]);
+    const data = await body(request);
+    const enabled = boolValue(data.enabled, false) ? 1 : 0;
+    const timestamp = now();
+    const results = await env.DB.batch([
+      env.DB.prepare("UPDATE links SET enabled=?,updated_at=? WHERE id=?").bind(enabled, timestamp, id),
+      env.DB.prepare("UPDATE navigation SET enabled=?,updated_at=? WHERE link_id=?").bind(enabled, timestamp, id),
+    ]);
+    if (!results[0]?.meta?.changes) return json({ error: "短链接不存在" }, 404);
+    invalidatePublicCache(request, ctx);
+    return json({ ok: true, enabled });
   }
 
   const linkMatch = path.match(/^\/api\/admin\/links\/(\d+)$/);
@@ -303,92 +985,68 @@ async function handleApi(request, env, ctx, parts) {
       }
       if (!validUrl(url)) return json({ error: "URL 必须是 http/https" }, 400);
 
+      const previous = await env.DB.prepare("SELECT code FROM links WHERE id=?").bind(id).first();
+      if (!previous) return json({ error: "短链接不存在" }, 404);
+
       try {
-        const result = await env.DB.prepare(
-          `UPDATE links SET code=?,url=?,title=?,description=?,category=?,enabled=?,updated_at=?
-           WHERE id=?`
-        )
-          .bind(
+        const timestamp = now();
+        const results = await env.DB.batch([
+          env.DB.prepare(
+            `UPDATE links SET code=?,url=?,title=?,description=?,category=?,enabled=?,updated_at=?
+             WHERE id=?`
+          ).bind(
             code,
             url,
             clean(data.title, 200),
             clean(data.description, 500),
             clean(data.category, 80),
             data.enabled === false ? 0 : 1,
-            now(),
+            timestamp,
             id
-          )
-          .run();
-
-        if (!result.meta?.changes) return json({ error: "短链接不存在" }, 404);
-
-        
-        await env.DB.prepare(
-          `UPDATE navigation
-           SET title=?,
-               description=?,
-               category=?,
-               enabled=?,
-               updated_at=?
-           WHERE link_id=?`
-        )
-          .bind(
+          ),
+          env.DB.prepare(
+            `UPDATE navigation
+             SET title=?,description=?,category=?,icon=?,enabled=?,updated_at=?
+             WHERE link_id=?`
+          ).bind(
             clean(data.title, 200),
             clean(data.description, 500),
             clean(data.category, 80),
+            faviconUrl(url),
             data.enabled === false ? 0 : 1,
-            now(),
+            timestamp,
             id
-          )
-          .run();
+          ),
+        ]);
 
+        if (!results[0].meta?.changes) return json({ error: "短链接不存在" }, 404);
       } catch (error) {
         if (String(error?.message || "").toLowerCase().includes("unique")) {
           return json({ error: "短码已存在" }, 409);
         }
         throw error;
       }
+      invalidatePublicCache(request, ctx);
+      invalidateRedirectCache(request, ctx, previous.code);
+      invalidateRedirectCache(request, ctx, code);
       return json({ ok: true });
     }
 
     if (method === "DELETE") {
+      const previous = await env.DB.prepare("SELECT code FROM links WHERE id=?").bind(id).first();
       const result = await env.DB.prepare("DELETE FROM links WHERE id=?")
         .bind(id)
         .run();
       if (!result.meta?.changes) return json({ error: "短链接不存在" }, 404);
+      invalidatePublicCache(request, ctx);
+      invalidateRedirectCache(request, ctx, previous?.code);
       return json({ ok: true });
     }
-  }
-
-  if (path === "/api/admin/navigation" && method === "GET") {
-    const result = await env.DB.prepare(
-      `SELECT 
-        navigation.*,
-        links.code,
-        links.title AS link_title,
-        links.description AS link_description,
-        links.category AS link_category,
-        links.enabled AS link_enabled
-       FROM navigation
-       LEFT JOIN links ON navigation.link_id = links.id
-       ORDER BY navigation.sort_order,navigation.id`
-    ).all();
-    const origin = new URL(request.url).origin;
-    const items = result.results.map((item) => ({
-      ...item,
-      short_url: item.code ? `${origin}/${item.code}` : "",
-      // 对关联短链接的导航，url 是实际可点击的短链接地址；
-      // 手动导航则保留数据库中的目标 URL。
-      url: item.code ? `${origin}/${item.code}` : item.url,
-    }));
-
-    return json({ items });
   }
 
   if (path === "/api/admin/navigation" && method === "POST") {
     const data = await body(request);
 
-    // V3.3：短链接直接加入导航
     if (data.link_id !== undefined && data.link_id !== null && data.link_id !== "") {
       const linkId = Number(data.link_id);
 
@@ -396,38 +1054,30 @@ async function handleApi(request, env, ctx, parts) {
         return json({ error: "短链接 ID 无效" }, 400);
       }
 
-      const link = await env.DB.prepare(
-        "SELECT * FROM links WHERE id=?"
-      ).bind(linkId).first();
+      const [linkResult, existsResult, maxResult] = await env.DB.batch([
+        env.DB.prepare("SELECT id,code,url,title,description,category,enabled,favorite FROM links WHERE id=?").bind(linkId),
+        env.DB.prepare("SELECT id FROM navigation WHERE link_id=? LIMIT 1").bind(linkId),
+        env.DB.prepare("SELECT COALESCE(MAX(sort_order),-1) m FROM navigation"),
+      ]);
+      const link = linkResult.results[0] || null;
 
       if (!link) {
         return json({ error: "短链接不存在" }, 404);
       }
 
-      const exists = await env.DB.prepare(
-        "SELECT id FROM navigation WHERE link_id=? LIMIT 1"
-      ).bind(linkId).first();
-
-      if (exists) {
+      if (existsResult.results.length) {
         return json({ error: "这个短链接已经在导航里了" }, 409);
       }
-
-      const max = await env.DB.prepare(
-        "SELECT COALESCE(MAX(sort_order),-1) m FROM navigation"
-      ).first();
 
       const requestUrl = new URL(request.url);
       const shortUrl = requestUrl.origin + "/" + link.code;
 
-      const icon =
-        "https://icons.duckduckgo.com/ip3/" +
-        encodeURIComponent(new URL(link.url).hostname) +
-        ".ico";
+      const icon = faviconUrl(link.url);
 
       await env.DB.prepare(
         `INSERT INTO navigation
-         (link_id,title,description,url,icon,category,sort_order,enabled,updated_at)
-         VALUES(?,?,?,?,?,?,?,?,?)`
+         (link_id,title,description,url,icon,category,sort_order,enabled,favorite,updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?)`
       )
         .bind(
           linkId,
@@ -436,16 +1086,17 @@ async function handleApi(request, env, ctx, parts) {
           shortUrl,
           icon,
           clean(link.category, 80),
-          Number(max?.m ?? -1) + 1,
+          Number(maxResult.results[0]?.m ?? -1) + 1,
           data.enabled === false || link.enabled === 0 ? 0 : 1,
+          Number(link.favorite) ? 1 : 0,
           now()
         )
         .run();
 
+      invalidatePublicCache(request, ctx);
       return json({ ok: true });
     }
 
-    // 保留手动添加导航
     const title = clean(data.title, 120);
     const url = clean(data.url, 2000);
 
@@ -453,14 +1104,11 @@ async function handleApi(request, env, ctx, parts) {
       return json({ error: "标题和有效 URL 必填" }, 400);
     }
 
-    const max = await env.DB.prepare(
-      "SELECT COALESCE(MAX(sort_order),-1) m FROM navigation"
-    ).first();
-
     await env.DB.prepare(
       `INSERT INTO navigation
-       (title,description,url,icon,category,sort_order,enabled,updated_at)
-       VALUES(?,?,?,?,?,?,?,?)`
+       (title,description,url,icon,category,sort_order,enabled,favorite,updated_at)
+       SELECT ?,?,?,?,?,COALESCE(MAX(sort_order),-1)+1,?,?,?
+       FROM navigation`
     )
       .bind(
         title,
@@ -468,12 +1116,13 @@ async function handleApi(request, env, ctx, parts) {
         url,
         clean(data.icon, 1000),
         clean(data.category, 80),
-        Number(max?.m ?? -1) + 1,
         data.enabled === false ? 0 : 1,
+        boolValue(data.favorite, false),
         now()
       )
       .run();
 
+    invalidatePublicCache(request, ctx);
     return json({ ok: true });
   }
 
@@ -497,7 +1146,45 @@ async function handleApi(request, env, ctx, parts) {
         .bind(index, now(), id)
     );
     if (statements.length) await env.DB.batch(statements);
+    invalidatePublicCache(request, ctx);
     return json({ ok: true });
+  }
+
+  const navFavoriteMatch = path.match(/^\/api\/admin\/navigation\/(\d+)\/favorite$/);
+  if (navFavoriteMatch && method === "PATCH") {
+    const id = Number(navFavoriteMatch[1]);
+    const data = await body(request);
+    const favorite = boolValue(data.favorite, false);
+    const current = await env.DB.prepare("SELECT id,link_id FROM navigation WHERE id=?").bind(id).first();
+    if (!current) return json({ error: "导航不存在" }, 404);
+    const timestamp = now();
+    const statements = [
+      env.DB.prepare("UPDATE navigation SET favorite=?,updated_at=? WHERE id=?").bind(favorite, timestamp, id),
+    ];
+    if (current.link_id) {
+      statements.push(env.DB.prepare("UPDATE links SET favorite=?,updated_at=? WHERE id=?").bind(favorite, timestamp, Number(current.link_id)));
+    }
+    await env.DB.batch(statements);
+    return json({ ok: true, favorite });
+  }
+
+  const navStatusMatch = path.match(/^\/api\/admin\/navigation\/(\d+)\/status$/);
+  if (navStatusMatch && method === "PATCH") {
+    const id = Number(navStatusMatch[1]);
+    const data = await body(request);
+    const enabled = boolValue(data.enabled, false) ? 1 : 0;
+    const current = await env.DB.prepare("SELECT id,link_id FROM navigation WHERE id=?").bind(id).first();
+    if (!current) return json({ error: "导航不存在" }, 404);
+    const timestamp = now();
+    const statements = [
+      env.DB.prepare("UPDATE navigation SET enabled=?,updated_at=? WHERE id=?").bind(enabled, timestamp, id),
+    ];
+    if (current.link_id) {
+      statements.push(env.DB.prepare("UPDATE links SET enabled=?,updated_at=? WHERE id=?").bind(enabled, timestamp, Number(current.link_id)));
+    }
+    await env.DB.batch(statements);
+    invalidatePublicCache(request, ctx);
+    return json({ ok: true, enabled });
   }
 
   const navMatch = path.match(/^\/api\/admin\/navigation\/(\d+)$/);
@@ -511,7 +1198,6 @@ async function handleApi(request, env, ctx, parts) {
       ).bind(id).first();
       if (!current) return json({ error: "导航不存在" }, 404);
 
-      // 关联短链接的导航是短链接的只读投影，避免把短链接 URL 当成真实目标 URL 写回 links。
       if (current.link_id) {
         return json({ error: "此导航已关联短链接，请在「短链接」中编辑内容" }, 409);
       }
@@ -537,6 +1223,7 @@ async function handleApi(request, env, ctx, parts) {
         .run();
 
       if (!result.meta?.changes) return json({ error: "导航不存在" }, 404);
+      invalidatePublicCache(request, ctx);
       return json({ ok: true });
     }
 
@@ -545,15 +1232,9 @@ async function handleApi(request, env, ctx, parts) {
         .bind(id)
         .run();
       if (!result.meta?.changes) return json({ error: "导航不存在" }, 404);
+      invalidatePublicCache(request, ctx);
       return json({ ok: true });
     }
-  }
-
-  if (path === "/api/admin/settings" && method === "GET") {
-    const result = await env.DB.prepare("SELECT key,value FROM settings").all();
-    return json({
-      settings: Object.fromEntries(result.results.map((x) => [x.key, x.value])),
-    });
   }
 
   if (path === "/api/admin/settings" && method === "PUT") {
@@ -568,6 +1249,7 @@ async function handleApi(request, env, ctx, parts) {
       );
 
     if (statements.length) await env.DB.batch(statements);
+    invalidatePublicCache(request, ctx);
     return json({ ok: true });
   }
 
@@ -575,24 +1257,43 @@ async function handleApi(request, env, ctx, parts) {
 }
 
 async function handleRedirect(request, env, ctx, code) {
+  await ensureDatabase(env);
   if (!CODE_RE.test(code)) return null;
-  const link = await env.DB.prepare(
-    "SELECT id,url FROM links WHERE code=? AND enabled=1"
-  ).bind(code).first();
-  if (!link) return null;
+  let link = null;
+
+  if (cacheAvailable()) {
+    try {
+      const cached = await caches.default.match(redirectCacheKey(request, code));
+      if (cached) link = await cached.json();
+    } catch (error) {
+      console.error("Redirect cache read failed", error);
+    }
+  }
+
+  if (!link) {
+    link = await env.DB.prepare(
+      "SELECT id,code,url FROM links WHERE code=? AND enabled=1"
+    ).bind(code).first();
+    if (!link) return null;
+
+    if (cacheAvailable()) {
+      try {
+        const response = json(link, 200, { "cache-control": PUBLIC_CACHE_CONTROL });
+        const put = caches.default.put(redirectCacheKey(request, code), response);
+        if (ctx?.waitUntil) ctx.waitUntil(put);
+      } catch (error) {
+        console.error("Redirect cache write failed", error);
+      }
+    }
+  }
 
   const timestamp = now();
-  ctx.waitUntil(
-    Promise.all([
-      env.DB.prepare(
-        "UPDATE links SET clicks=clicks+1,last_clicked_at=?,updated_at=? WHERE id=?"
-      ).bind(timestamp, timestamp, link.id).run(),
-      env.DB.prepare(
-        "INSERT INTO link_visits(link_id,visited_at) VALUES(?,?)"
-      ).bind(link.id, timestamp).run(),
-    ])
-  );
-
+  const day = timestamp.slice(0, 10);
+  waitUntil(ctx, env.DB.batch([
+    env.DB.prepare("UPDATE links SET clicks=clicks+1,last_clicked_at=? WHERE id=?").bind(timestamp, link.id),
+    env.DB.prepare(`INSERT INTO link_daily_stats(link_id,day,clicks) VALUES(?,?,1)
+      ON CONFLICT(link_id,day) DO UPDATE SET clicks=link_daily_stats.clicks+1`).bind(link.id, day),
+  ]).catch((error) => console.error("Click analytics write failed", error)));
   return Response.redirect(link.url, 302);
 }
 
@@ -604,40 +1305,38 @@ export default {
     try {
       if (parts[0] === "api") return await handleApi(request, env, ctx, parts);
 
-      // Pages Assets 不同配置下对 /admin 的处理可能不同，这里显式映射到 admin.html。
-      if (
-  url.pathname === "/admin" ||
-  url.pathname === "/admin/"
-) {
-  const adminUrl = new URL("/admin.html", url);
-  const adminRequest = new Request(adminUrl.toString(), {
-    method: "GET",
-    headers: request.headers,
-  });
+      if (url.pathname === "/admin" || url.pathname === "/admin/") {
+        const adminUrl = new URL("/admin.html", url);
+        const adminRequest = new Request(adminUrl.toString(), {
+          method: "GET",
+          headers: request.headers,
+        });
+        const adminResponse = await env.ASSETS.fetch(adminRequest);
+        const adminHeaders = new Headers(adminResponse.headers);
+        Object.entries(SECURITY_HEADERS).forEach(([key, value]) => adminHeaders.set(key, value));
+        adminHeaders.set("cache-control", "no-store");
+        return new Response(adminResponse.body, {
+          status: adminResponse.status,
+          statusText: adminResponse.statusText,
+          headers: adminHeaders,
+        });
+      }
 
-  return env.ASSETS.fetch(adminRequest);
-}
+      if (parts.length === 1 && parts[0] && parts[0] !== "admin.html") {
+        const redirect = await handleRedirect(request, env, ctx, parts[0]);
+        if (redirect) return redirect;
+      }
 
-      if (
-  parts.length === 1 &&
-  parts[0] &&
-  parts[0] !== "admin.html"
-) {
-  const redirect =
-    await handleRedirect(
-      request,
-      env,
-      ctx,
-      parts[0]
-    );
-
-  if (redirect) return redirect;
-}
-
-      return env.ASSETS.fetch(request);
+      const assetResponse = await env.ASSETS.fetch(request);
+      const headers = new Headers(assetResponse.headers);
+      Object.entries(SECURITY_HEADERS).forEach(([key, value]) => headers.set(key, value));
+      return new Response(assetResponse.body, { status: assetResponse.status, statusText: assetResponse.statusText, headers });
     } catch (error) {
-      console.error(error);
-      return json({ error: error?.message || "Server error" }, 500);
+      if (error instanceof RequestError) {
+        return json({ error: error.message }, error.status);
+      }
+      console.error("Unhandled request error", error);
+      return json({ error: "服务器内部错误，请稍后重试" }, 500);
     }
   },
 };
