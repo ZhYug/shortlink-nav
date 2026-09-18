@@ -5,6 +5,4 @@
 name = "st-nav"
 pages_build_output_dir = "./public"
 compatibility_date = "2026-09-11"
-
-[observability]
-enabled = true
+keep_vars = true
