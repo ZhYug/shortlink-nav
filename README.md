@@ -1,94 +1,207 @@
 # ST Nav 1.0.0
 
-> 轻量级个人导航 + 短链接管理系统，基于 **Cloudflare Pages Advanced Mode + D1**。
->
-> **1.0.0 是当前发布版本号。** D1 的 `0001/0002/0003` 是数据库迁移编号，与应用版本号相互独立，请勿因为应用版本改为 1.0.0 而重置或删除已有 migration。
+ST Nav 是一个基于 **Cloudflare Pages Advanced Mode + D1** 的个人导航与短链接管理系统。
 
-## 一、当前功能
+---
 
-### 前台导航
-- 响应式导航卡片，支持分类、搜索、收藏、最近访问。
-- 支持自定义站点标题、副标题、首页文案、SEO 描述和强调色。
-- 支持移动端、平板、PC、大屏分别设置每行卡片数量。
-- 支持隐藏分类、分类顺序和多种分类标签样式。
+## 一、项目使用说明
 
-### 短链接管理
-- 创建、编辑、删除短链接。
-- 自定义短码或留空自动生成。
-- 短码实时可用性检查，编辑时会排除当前记录。
-- 单条启用/停用。
-- 单条收藏，并与关联导航同步。
-- 打开短链接、复制短链接。
-- 排序、搜索、分类筛选、分页。
-- 当前页选择、全部选择、取消选择。
-- 批量加入导航、移出导航、启用、停用、删除。
-- CSV 导入、CSV 导出。
+### 1. 前台导航
 
-### 导航管理
-- 创建、编辑、删除导航项目。
-- 上移、下移和保存排序。
-- 打开链接、复制链接。
-- 收藏 / 取消收藏。
-- 单条启用 / 停用。
-- 当前页选择、全部选择、取消选择。
-- 批量启用、停用、删除。
-- 移动端采用单列紧凑卡片；PC 端保持多列布局。
-- 与短链接关联的导航会同步关联短链接的收藏和启停状态。
+访问网站首页即可使用导航功能：
 
-### 数据管理
-- 短链接 CSV 导入 / 导出。
-- JSON 完整备份与恢复。
-- 支持合并恢复和完全覆盖恢复。
-- 备份包含短链接、导航、设置和点击统计。
+- 分类导航卡片
+- 站点搜索
+- 收藏
+- 最近访问
+- 自定义站点标题、副标题、首页文案
+- SEO 描述与强调色
+- 移动端、平板、PC、大屏布局设置
+- 分类隐藏、排序及标签样式
 
-## 二、项目结构
+### 2. 管理后台
+
+访问：
 
 ```text
-st-nav/
+/admin.html
+```
+
+使用 Cloudflare Pages 中配置的 `ADMIN_PASSWORD` 登录。
+
+后台提供：
+
+#### 短链接管理
+
+- 创建、编辑、删除短链接
+- 自定义短码或自动生成短码
+- 短码可用性检查
+- 启用 / 停用
+- 收藏
+- 搜索、排序、分类筛选、分页
+- 批量启用、停用、删除
+- 批量加入导航、移出导航
+- 打开、复制短链接
+- CSV 导入 / 导出
+
+#### 导航管理
+
+- 创建、编辑、删除导航项目
+- 上移、下移及保存排序
+- 打开、复制链接
+- 收藏 / 取消收藏
+- 启用 / 停用
+- 批量选择及批量操作
+- 与关联短链接同步收藏及启停状态
+
+#### 数据管理
+
+- CSV 导入 / 导出
+- JSON 完整备份
+- JSON 合并恢复
+- JSON 完全覆盖恢复
+- 备份包含短链接、导航、设置及点击统计
+
+---
+
+## 二、项目实现功能
+
+### 前端
+
+- Cloudflare Pages Advanced Mode
+- 响应式导航界面
+- PC / 平板 / 手机布局
+- 搜索、收藏、最近访问
+- Service Worker / PWA 基础支持
+- 管理后台独立页面
+
+### Worker
+
+- Pages Advanced Mode `_worker.js`
+- 静态资源通过 `env.ASSETS` 提供
+- API 路由
+- 管理员 Session 登录
+- 登录限流
+- 安全响应头
+- 短链接跳转
+- D1 数据库访问
+
+### D1 数据库
+
+数据库结构通过 `migrations/` 版本化管理：
+
+```text
+migrations/
+├── 0001_initial.sql
+├── 0002_link_favorites.sql
+└── 0003_navigation_favorites.sql
+```
+
+首次使用空 D1 时，Worker 会通过已经配置的 `DB` Binding 自动：
+
+1. 创建 migration 记录表；
+2. 按顺序执行尚未执行的 migration；
+3. 创建业务表和索引；
+4. 插入初始设置及默认导航数据；
+5. 记录已经完成的 migration。
+
+以后新增：
+
+```text
+migrations/0004_xxx.sql
+```
+
+重新部署并访问项目后，只会执行尚未完成的 migration，不会重复执行已经完成的 migration。
+
+**不要修改或删除已经在生产数据库执行过的 migration。数据库结构变化请新增 migration。**
+
+---
+
+# 三、Cloudflare Dashboard 完整部署教程
+
+本项目推荐使用：
+
+```text
+GitHub
+  ↓
+Cloudflare Pages
+  ↓
+Cloudflare Dashboard 配置 D1 Binding
+  ↓
+GitHub 自动构建
+  ↓
+Worker 自动初始化 / 更新 D1
+```
+
+整个部署流程**不需要把 Cloudflare API Token 放进 GitHub 项目，也不需要配置 `D1_DATABASE_ID`**。
+
+> 注意：D1 数据库资源本身需要在 Cloudflare Dashboard 创建一次。创建的是一个空数据库，不需要手动建表或执行 SQL。
+
+---
+
+## 第一步：准备 GitHub 仓库
+
+把整个项目上传到 GitHub。
+
+推荐：
+
+```text
+Production branch:
+main
+```
+
+仓库根目录应该直接包含：
+
+```text
+public/
+migrations/
+scripts/
+package.json
+.gitignore
+.nvmrc
+```
+
+不要再额外套一层项目目录。
+
+例如正确：
+
+```text
+github.com/你的账号/st-nav
 ├── public/
-│   ├── _worker.js              # Pages Advanced Mode Worker 入口
-│   ├── index.html              # 前台首页
-│   ├── admin.html              # 管理后台
-│   ├── assets/
-│   │   ├── app.js
-│   │   ├── admin.js
-│   │   ├── common.js
-│   │   └── styles.css
-│   ├── sw.js
-│   ├── manifest.webmanifest
-│   └── .assetsignore
 ├── migrations/
-│   ├── 0001_initial.sql        # D1 初始完整业务表 + 默认设置/示例导航
-│   ├── 0002_link_favorites.sql # 短链接收藏字段
-│   └── 0003_navigation_favorites.sql # 导航收藏字段
 ├── scripts/
-│   └── doctor.mjs              # 项目结构与部署配置检查
-├── .dev.vars.example
-├── .gitignore
-├── .nvmrc
 └── package.json
 ```
 
-> **不要删除 `public/_worker.js`。** Pages Advanced Mode 使用它接管请求，并通过 `env.ASSETS.fetch()` 返回静态资源。
-
-## 三、第一次部署：推荐流程
-
-本项目专门适配 **Cloudflare Pages + GitHub 集成 + D1 Binding**。
-
-核心目标是：**仓库不保存 D1 `database_id`，Cloudflare Dashboard 不需要配置 `D1_DATABASE_ID`，也不需要在项目中保存 Cloudflare API Token。**
-
-### 1. 上传 GitHub
-
-将整个项目目录上传到 GitHub，例如仓库名：`st-nav`。
-
-推荐生产分支：`main`。
-
-### 2. 创建 D1（第一次只做一次）
-
-在 Cloudflare Dashboard 创建 D1 数据库：
+而不是：
 
 ```text
-Workers & Pages → D1 → Create database
+github.com/你的账号/st-nav
+└── st-nav/
+    ├── public/
+    ├── migrations/
+    └── package.json
+```
+
+---
+
+## 第二步：创建 Cloudflare D1 数据库
+
+登录 Cloudflare Dashboard。
+
+进入：
+
+```text
+Workers & Pages
+→ D1
+```
+
+或者在 Cloudflare 的存储 / 数据库入口进入 D1。
+
+点击：
+
+```text
+Create database
 ```
 
 数据库名称建议：
@@ -97,65 +210,261 @@ Workers & Pages → D1 → Create database
 st-nav
 ```
 
-这一步只是创建 Cloudflare 的 D1 资源，**不需要手动创建表，也不需要导入 SQL。**
+创建完成即可。
 
-### 3. Pages 绑定 D1
+### 重要
 
-创建 Pages 项目后进入：
+这里**不要**：
+
+- 手动创建表
+- 手动执行 `CREATE TABLE`
+- 手动执行 migration SQL
+- 手动导入初始数据
+
+保持数据库为空即可。
+
+本项目会在第一次运行时自动初始化。
+
+---
+
+# 四、创建 Cloudflare Pages 项目
+
+进入：
 
 ```text
-Pages 项目 → Settings → Bindings → Add → D1 database
+Workers & Pages
+→ Create application
+→ Pages
+→ Connect to Git
 ```
 
-填写：
+选择：
 
 ```text
-Variable name: DB
-D1 database: st-nav
+GitHub
 ```
 
-**变量名必须是 `DB`。**
+授权 Cloudflare 访问 GitHub 后，选择你的 `st-nav` 仓库。
 
-Cloudflare Pages 的 D1 binding 负责让运行中的 Worker 访问这个数据库；仓库本身不保存真实 `database_id`。
+---
 
-### 4. Cloudflare Dashboard 的 GitHub 构建设置
+## 五、Cloudflare Pages 构建设置
 
-第一次连接 GitHub 时填写：
+本版本已经加入项目根目录的 `wrangler.toml`，由它声明 Cloudflare Pages 的静态资源目录：
+
+```toml
+pages_build_output_dir = "./public"
+```
+
+因此，使用 **Pages + GitHub** 创建项目时，不再需要手动填写 Build Command / Build output directory。
+
+创建项目时：
+
+### Project name
+
+例如：
 
 ```text
-Project name:
-shortlink-nav
+st-nav
+```
 
-Production branch:
+### Production branch
+
+```text
 main
+```
 
-Framework preset:
+### Framework preset
+
+```text
 None
+```
 
-Build command:
-npm run build
+### Build command
 
-Build output directory:
-public
+**留空，不填写。**
 
-Root directory:
+### Build output directory
+
+**留空，不填写。**
+
+### Root directory
+
+```text
 /
 ```
 
-**不要填写 `npm run deploy`。**
+然后直接进入环境变量配置并点击：
 
-`npm run deploy` 是给本地 Wrangler CLI 使用的；Cloudflare Pages Git 集成已经负责最终的 Pages 部署，如果再调用 `wrangler pages deploy` 会形成重复部署。
+```text
+Save and Deploy
+```
 
-### 5. 配置生产环境变量 / Secret
+Cloudflare 会读取仓库中的：
 
-只需要配置应用运行时需要的变量：
+```text
+wrangler.toml
+```
+
+并使用：
+
+```text
+public/
+```
+
+作为 Pages 的部署目录。
+
+> 注意：`public/` 仍然是项目实际的 Pages 输出目录，只是现在由 `wrangler.toml` 管理，不需要在第一次创建 Pages 项目时手工填写。
+
+本项目不依赖 `npm run build` 才能完成第一次 Pages 部署。`public/_worker.js` 已经是可直接部署的 Pages Advanced Mode Worker。
+
+# 六、第一次部署
+
+点击：
+
+```text
+Save and Deploy
+```
+
+Cloudflare 会从 GitHub 拉取代码并执行：
+
+```bash
+npm run build
+```
+
+构建完成后部署 `public`。
+
+第一次部署时，**先让网站完成一次成功部署即可**。
+
+---
+
+# 七、配置 D1 Binding
+
+第一次 Pages 部署完成后进入你的 Pages 项目：
+
+```text
+Settings
+→ Bindings
+```
+
+找到 D1 database。
+
+点击：
+
+```text
+Add
+```
+
+选择：
+
+```text
+D1 database
+```
+
+配置：
+
+```text
+Variable name:
+DB
+```
+
+然后选择刚才创建的：
+
+```text
+st-nav
+```
+
+最终关系必须是：
+
+```text
+DB → st-nav
+```
+
+### 变量名必须是 `DB`
+
+项目 Worker 使用：
+
+```text
+env.DB
+```
+
+访问 D1。
+
+因此不要使用：
+
+```text
+DATABASE
+D1
+DB1
+MY_DB
+```
+
+除非同时修改项目代码。
+
+### 如果出现：
+
+```text
+Another variable with this name already exists in this worker.
+```
+
+说明项目已经存在名为 `DB` 的变量 / Binding。
+
+这时不要再次创建 `DB`。
+
+检查当前 Bindings，确认已有的 `DB` 是否已经指向正确的 D1。
+
+### 如果出现：
+
+```text
+Bindings for this project are being managed through wrangler.toml.
+```
+
+说明当前 Cloudflare Pages 项目仍然由旧的 Wrangler 配置管理。
+
+本项目当前代码不依赖 `wrangler.toml` 管理生产 D1 Binding。
+
+确认 GitHub 最新版本已经部署后，再检查 Bindings。
+
+如果旧 Pages 项目仍持续锁定 Wrangler 配置管理，建议新建一个 Pages 项目重新连接当前 GitHub 仓库。
+
+---
+
+# 八、配置生产环境变量
+
+进入：
+
+```text
+Settings
+→ Variables and Secrets
+```
+
+选择：
+
+```text
+Production
+```
+
+添加：
+
+### ADMIN_PASSWORD
 
 ```text
 ADMIN_PASSWORD=你的管理员密码
-SESSION_SECRET=随机高熵字符串
 ```
 
-**不需要配置：**
+这是后台登录密码。
+
+### SESSION_SECRET
+
+设置一个随机、高强度的字符串，例如至少 32 个字符。
+
+```text
+SESSION_SECRET=一串随机高强度字符串
+```
+
+### 本项目不需要配置
+
+不要添加：
 
 ```text
 D1_DATABASE_ID
@@ -163,171 +472,334 @@ CLOUDFLARE_API_TOKEN
 CLOUDFLARE_ACCOUNT_ID
 ```
 
-### 6. 数据库初始化是自动的
+项目不把 D1 `database_id` 放进代码仓库。
 
-这里是本项目和普通静态 Pages 项目的主要区别。
+---
 
-本项目不在 GitHub 仓库保存 D1 `database_id`，也不要求 Cloudflare API Token。构建阶段只把 `migrations/*.sql` 嵌入 Pages Worker；真正运行时由已经绑定的 `DB` D1 Binding 执行 SQL migration。
+# 九、重新部署让 Binding 生效
 
-第一次真正访问网站/API 时：
+添加或修改 D1 Binding 后，重新部署项目。
+
+可以在 Cloudflare Pages：
 
 ```text
-访问网站
-   ↓
-Worker 获得 DB Binding
-   ↓
-创建 _stnav_migrations 版本表
-   ↓
-检查 0001 / 0002 / 0003
-   ↓
-执行尚未完成的 migration
-   ↓
-创建业务表 + 索引
-   ↓
-插入默认设置 + 默认导航数据
-   ↓
-记录 migration 已完成
+Deployments
+→ Retry deployment
 ```
 
-因此你**不需要进入 D1 Console 手工初始化表或插入数据**。
+或者向 GitHub `main` 推送新的 commit，让 Cloudflare 自动构建。
 
-### 7. 后续更新也是自动的
+Cloudflare Pages Binding 修改后，应重新部署，使新的 Binding 出现在 Worker 运行环境。
 
-以后增加：
+---
+
+# 十、自动初始化数据库
+
+这是本项目的核心功能。
+
+完成：
+
+```text
+D1 创建
++
+DB Binding
++
+ADMIN_PASSWORD
++
+SESSION_SECRET
++
+Pages 部署
+```
+
+以后，不需要打开 D1 Console 创建表。
+
+第一次访问：
+
+```text
+https://你的域名/
+```
+
+Worker 会获得：
+
+```text
+env.DB
+```
+
+然后检查 migration 状态。
+
+如果数据库是全新的：
+
+```text
+_stnav_migrations
+       ↓
+0001_initial.sql
+       ↓
+0002_link_favorites.sql
+       ↓
+0003_navigation_favorites.sql
+```
+
+自动执行。
+
+完成后数据库会包含项目运行所需要的表、索引、设置及初始导航数据。
+
+---
+
+# 十一、如何确认数据库初始化成功
+
+部署完成后访问：
+
+```text
+/
+```
+
+或者：
+
+```text
+/api/health
+```
+
+如果 Worker 正常运行并且 D1 Binding 正确，数据库初始化会自动完成。
+
+然后进入：
+
+```text
+/admin.html
+```
+
+使用：
+
+```text
+ADMIN_PASSWORD
+```
+
+登录。
+
+检查：
+
+- 导航是否正常显示
+- 短链接管理是否正常
+- 设置是否正常
+- 收藏是否正常
+- 创建短链接是否正常
+
+---
+
+# 十二、以后如何更新数据库
+
+不要手工进入 D1 Console 修改生产表结构。
+
+例如需要新增字段：
 
 ```text
 migrations/0004_add_xxx.sql
 ```
 
-提交 GitHub 后 Cloudflare 自动构建部署。
+内容例如：
 
-新版本 Worker 启动后会检查 `_stnav_migrations`：
+```sql
+ALTER TABLE links ADD COLUMN example TEXT;
+```
+
+然后：
 
 ```text
-0001 → 已完成 → 跳过
-0002 → 已完成 → 跳过
-0003 → 已完成 → 跳过
-0004 → 未完成 → 自动执行
-```
-
-因此数据库结构和初始数据会跟着代码版本增量更新。
-
-> 重要：不要修改已经在生产环境执行过的 migration。数据库结构变更请始终新增 `0004`、`0005` 等 migration。
-
-## 四、本地开发
-
-安装依赖后：
-
-```bash
-npm install
-npm run dev
-```
-
-构建 Worker 时会自动把 `migrations/*.sql` 嵌入 Pages Worker：
-
-```bash
-npm run build
-```
-
-生产环境的 D1 使用 Cloudflare Pages 的 `DB` Binding；本地 Wrangler D1 可以使用独立的本地数据库进行测试。
-
-## 五、CLI 部署（可选）
-
-如果不使用 Cloudflare GitHub 集成，也可以在本地通过 Wrangler 部署：
-
-```bash
-npx wrangler login
-npm run deploy
-```
-
-这个命令只负责标准 Pages 部署：
-
-```text
-npm run build
-      ↓
-生成 public/_worker.js
-      ↓
-wrangler pages deploy public --project-name st-nav
-```
-
-运行时数据库仍然要求 Pages 的 `DB` Binding 已经存在。Dashboard GitHub 部署不使用这个脚本。
-
-## 六、数据库与首次部署说明
-
-### 空数据库
-
-新建 D1 后，**不要手工执行 SQL**。
-
-只需要：
-
-```text
-创建 D1
+GitHub
   ↓
-Pages 绑定 DB
+git push
   ↓
-GitHub 部署
+Cloudflare Pages 自动构建
   ↓
-首次请求自动初始化
+Worker 更新
+  ↓
+首次请求检查 migration
+  ↓
+发现 0004 尚未执行
+  ↓
+自动执行 0004
 ```
 
-当前 migration：
+已经完成的：
 
 ```text
-migrations/0001_initial.sql
-migrations/0002_link_favorites.sql
-migrations/0003_navigation_favorites.sql
+0001 → 跳过
+0002 → 跳过
+0003 → 跳过
 ```
 
-`0001` 会创建业务表、索引、默认设置和默认导航数据；`0002`、`0003` 会继续添加收藏字段。
-
-### 已有数据库
-
-不要删除数据库，也不要重新执行旧 migration。
-
-直接提交新的 migration：
+只有：
 
 ```text
-migrations/0004_xxx.sql
+0004 → 执行
 ```
 
-然后正常 GitHub 部署即可。
+---
 
-### Worker 的数据库初始化
+# 十三、Migration 规则
 
-Worker 会在第一次需要数据库的请求中自动初始化数据库，并使用 `_stnav_migrations` 保存应用过的 migration 编号。
+必须遵守：
 
-如果数据库初始化失败，当前请求会返回错误；修复部署问题后再次请求即可继续初始化。已经成功完成的 migration 不会重复执行。
+### 正确
 
-## 八、备份与恢复
+```text
+0001_initial.sql
+0002_link_favorites.sql
+0003_navigation_favorites.sql
+0004_add_xxx.sql
+0005_add_yyy.sql
+```
 
-后台的「系统管理 → 数据管理」提供：
+### 不要
 
-- CSV 导入 / 导出
-- JSON 备份
-- JSON 合并恢复
-- JSON 完全覆盖恢复
+修改已经部署过的：
 
-建议在执行覆盖恢复前先下载一份新的 JSON 备份。
+```text
+0001_initial.sql
+```
 
-## 九、常见问题
+或者：
 
-### 页面可以打开，但后台 API 报数据库错误
+```text
+0002_link_favorites.sql
+```
+
+### 正确的数据库更新方式
+
+永远新增：
+
+```text
+0004_xxx.sql
+```
+
+而不是修改：
+
+```text
+0003_navigation_favorites.sql
+```
+
+这样可以保证不同环境的数据库版本一致。
+
+---
+
+# 十四、前台使用
+
+打开：
+
+```text
+/
+```
+
+可以：
+
+- 浏览分类
+- 搜索站点
+- 收藏站点
+- 查看最近访问
+- 打开导航
+- 打开短链接
+
+---
+
+# 十五、后台使用
+
+打开：
+
+```text
+/admin.html
+```
+
+登录后可以管理：
+
+### 短链接
+
+```text
+创建
+编辑
+删除
+启用
+停用
+收藏
+搜索
+排序
+筛选
+分页
+批量操作
+CSV 导入
+CSV 导出
+```
+
+### 导航
+
+```text
+创建
+编辑
+删除
+排序
+收藏
+启用
+停用
+批量操作
+```
+
+### 数据
+
+```text
+JSON 备份
+JSON 合并恢复
+JSON 完全覆盖恢复
+CSV 导入 / 导出
+```
+
+---
+
+# 十六、数据备份建议
+
+生产环境建议定期进入：
+
+```text
+/admin.html
+→ 系统管理
+→ 数据管理
+```
+
+下载 JSON 备份。
+
+尤其是在：
+
+- 大量修改导航前
+- 执行数据恢复前
+- 大版本更新前
+- 修改数据库 migration 前
+
+先保存一份备份。
+
+---
+
+# 十七、常见问题
+
+## 1. 页面能打开，但后台提示数据库错误
+
+依次检查：
+
+```text
+□ D1 是否已经创建
+□ Pages → Settings → Bindings 是否存在 DB
+□ DB 是否绑定到正确的 D1
+□ ADMIN_PASSWORD 是否设置
+□ SESSION_SECRET 是否设置
+□ Binding 修改后是否重新部署
+```
+
+---
+
+## 2. 登录失败
 
 检查：
 
-1. Cloudflare Pages 是否成功完成 Build；
-2. Pages → Settings → Bindings 中是否存在 `DB` D1 binding；
-3. `DB` 是否绑定到正确的 D1；
-4. `ADMIN_PASSWORD` 是否存在；
-5. `SESSION_SECRET` 是否存在；
-6. 添加或修改 Binding 后是否重新部署。
-
-### 登录提示未配置管理员密码
-
-进入：
-
 ```text
-Pages → Settings → Variables and Secrets → Production
+Settings
+→ Variables and Secrets
+→ Production
 ```
 
 确认：
@@ -337,78 +809,111 @@ ADMIN_PASSWORD
 SESSION_SECRET
 ```
 
-均已设置。
+已经设置。
 
-### 短链接收藏或导航收藏字段不存在
+修改 Secret 后重新部署。
 
-说明 Worker 尚未完成运行时 migration。不要手工修改表结构。
+---
 
-重新访问首页或 `/api/health`，Worker 会继续执行尚未完成的 migration。
+## 3. 数据库表不存在
 
-如果仍失败，请查看 Pages Functions 日志。
+不要手工执行 SQL。
 
-### CSS / JS 更新后浏览器仍显示旧界面
-
-项目会为前台和后台资源使用缓存版本参数。发布新代码后，如果仍看到旧界面，可以强制刷新浏览器或清理站点缓存。
-
-## 十、安全建议
-
-- 使用强管理员密码。
-- `SESSION_SECRET` 使用独立随机值，至少 32 个字符。
-- 不要提交 `.dev.vars`。
-- 正式环境建议配合 Cloudflare WAF / Rate Limiting 保护登录接口。
-- Preview 环境建议使用独立 D1，避免测试数据进入生产库。
-- 定期下载 JSON 数据备份。
-- 不要删除或改写已经应用到生产数据库的 migration 文件。
-
-## 十一、发布检查清单
-
-部署前运行：
-
-```bash
-npm run doctor
-```
-
-构建检查：
-
-```bash
-npm run build
-```
-
-Cloudflare GitHub 集成部署使用 Dashboard 中的 Build command：`npm run build`。数据库初始化/升级由 Pages Worker 通过 `DB` Binding 自动完成。
-
-确认：
+先：
 
 ```text
-□ D1 数据库已创建
-□ DB binding 正确
-□ 首次请求自动初始化 migrations
-□ ADMIN_PASSWORD 已设置
-□ SESSION_SECRET 已设置
-□ npm run doctor 通过
-□ Pages Deployment 成功
-□ 首页可以访问
-□ /admin.html 可以登录
-□ 短链接可以创建并访问
-□ 导航、收藏、启停、排序功能正常
+重新部署
 ```
 
-## 十二、当前发布版本
+然后访问：
 
-### 1.0.0
+```text
+/
+```
 
-当前正式项目版本。包含：
+或者：
 
-- Cloudflare Pages Advanced Mode + D1 架构
-- 前台响应式个人导航
-- 短链接创建、编辑、删除、搜索、排序、分页
-- 短码实时可用性检查
-- 短链接打开、复制、收藏、启停
-- CSV 导入导出
-- 导航排序、编辑、打开、复制、收藏、启停
-- 导航批量选择与批量操作
-- 移动端导航单列紧凑卡片
-- PC / 移动端短链接管理布局优化
-- JSON 数据备份与恢复
-- 管理员 Session、登录限流及安全响应头
-- D1 标准 migration 初始化与升级流程
+```text
+/api/health
+```
+
+Worker 会继续执行尚未完成的 migration。
+
+---
+
+## 4. 某个 migration 执行失败
+
+不要删除数据库。
+
+检查 Cloudflare Pages / Worker 日志。
+
+修复代码或 migration 后重新部署并再次访问。
+
+已经成功执行的 migration 不会重复执行。
+
+---
+
+## 5. Cloudflare 提示 DB 变量重复
+
+如果看到：
+
+```text
+Another variable with this name already exists in this worker.
+```
+
+说明 `DB` 已经存在。
+
+检查：
+
+```text
+Settings
+→ Bindings
+```
+
+确认现有：
+
+```text
+DB
+```
+
+是否已经指向正确的 D1。
+
+不要创建：
+
+```text
+DB2
+```
+
+来替代，除非同步修改 Worker 代码。
+
+---
+
+## 6. Cloudflare 提示由 wrangler.toml 管理 Bindings
+
+当前版本本来就包含：
+
+```text
+wrangler.toml
+```
+
+其中：
+
+```toml
+pages_build_output_dir = "./public"
+```
+
+用于告诉 Cloudflare Pages 使用 `public/` 作为部署目录。
+
+这不会要求你把 `D1_DATABASE_ID` 放进仓库。D1 仍然可以通过：
+
+```text
+Pages
+→ Settings
+→ Bindings
+→ D1 database
+→ Variable name: DB
+```
+
+绑定。
+
+如果 Cloudflare 要求重新部署才能应用 Binding，执行一次新的 GitHub commit / Retry deployment 即可。
